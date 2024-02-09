@@ -1,0 +1,9 @@
+website:
+  sidebar:
+    contents:
+      - index.ipynb
+      - 00_core.ipynb
+      - 10_IntroSparseLinear.ipynb
+      - 11_FeaturesOfSparseLinear.ipynb
+      - 12_HypotheticalGraph.ipynb
+      - 13_MultilayerNodes.ipynb

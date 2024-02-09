@@ -1,0 +1,9 @@
+project:
+  output-dir: _docs
+
+website:
+  title: "sparsevnn"
+  site-url: "https://DanielKick-USDA.github.io/sparsevnn"
+  description: "Python library for producing visual neural networks using sparse linear layers to speed up model fitting."
+  repo-branch: main
+  repo-url: "https://github.com/DanielKick-USDA/sparsevnn"
