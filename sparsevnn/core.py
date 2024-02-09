@@ -131,9 +131,10 @@ class SparseLinearCustom(nn.Module):
     def __init__(self, in_features, out_features, bias=True, sparsity=0.9, connectivity=None, small_world=False, dynamic=False, deltaT=6000, Tend=150000, alpha=0.1, max_size=1e8,
                  custom_weights=None, custom_bias=None, 
                  weight_grad_bool=None, bias_grad_bool=None, # indices in sparse format for those entries that should have their gradients NOT zeroed (non identity cells)
-                 dropout_p=0.0 # apply dropout  
+                 dropout_p=0.0, # apply dropout  
                  # dropout should either be applied at a consistent rate with dropout_p (which will ignore identity cells unless bias_grad_bool is none) 
-                 # OR should be provided as a vector of dropout probabilities which will can be used to provide a specific dropout to a specific node. 
+                 # OR should be provided as a vector of dropout probabilities which will can be used to provide a specific dropout to a specific node.
+                 nonlinear_transform=None # What is the non-linear transformation that should be applied to the non-identity units?
                  ):
         assert in_features < 2**31 and out_features < 2**31 and sparsity < 1.0
         assert connectivity is None or not small_world, "Cannot specify connectivity along with small world sparsity"
@@ -170,6 +171,8 @@ class SparseLinearCustom(nn.Module):
                 assert dropout_p.shape[0] == out_features
                 # if dropout isn't None then it should be a parameter so it ends up on the right device.
                 self.dropout_p = nn.Parameter(dropout_p).requires_grad_(False)
+
+        self.nonlinear_transform = nonlinear_transform
 
         # Generate and coalesce indices
         coalesce_device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu') # Faster to coalesce on GPU
@@ -380,7 +383,21 @@ class SparseLinearCustom(nn.Module):
                 probs = probs*weight_outputs+(temp_ones*identity_outputs)
                 # probs = probs*weight_outputs+(torch.ones(output.shape)*identity_outputs)
             output = output*torch.bernoulli(probs)
-  
+
+        # apply nonlinear tranform (e.g. relu) to the non-identity outputs
+        if self.nonlinear_transform is not None:
+            # apply transform to all?
+            if self.bias_grad_bool == None: 
+                output = self.nonlinear_transform(output)
+
+            elif self.bias_grad_bool != None: # assume weight == 2, identity == 1
+                weight_outputs   =    (-1+self.bias_grad_bool)
+                identity_outputs = -1*(-2+self.bias_grad_bool)
+
+                output_transformed = self.nonlinear_transform(output)
+                # keep transformed values only on non-identity outputs
+                output = (output_transformed*weight_outputs)+(output*identity_outputs)
+
         return output.view(output_shape)
 
     def extra_repr(self):
