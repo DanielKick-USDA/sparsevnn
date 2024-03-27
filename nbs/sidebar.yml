@@ -3,6 +3,7 @@ website:
     contents:
       - index.ipynb
       - 00_core.ipynb
+      - 01_qol.ipynb
       - 10_IntroSparseLinear.ipynb
       - 11_FeaturesOfSparseLinear.ipynb
       - 12_HypotheticalGraph.ipynb
