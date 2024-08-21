@@ -22,6 +22,8 @@ import re # name_cleanup
 
 from graphviz import Digraph
 
+import plotly.express as px
+
 # %% ../nbs/00_core.ipynb 5
 def name_cleanup(input = '7_1_2_1P-TypeH+-ExportingTransporter', newline_char_threshold = 10):
     inp = input
@@ -95,12 +97,21 @@ def connection_matrix_to_dict(
     node_names = None # Optional list of names for the nodes. If none is provided nodes will be named "0" to "n".
     )-> dict:
     "Convert a matrix represenation of a graph to a dictionary of the edges structured as `{<parent>:[<children>], ... }`"
-    if node_names == None:
-        node_names = [str(i) for i in range(connections.size()[0])]
+    connections = connections.to(int)
+    # in connections 0 is no connection. But since we are getting indices and a connection _could_ be at index 0 if these are shuffled we mask the empty connections before multiplying
+    mask_0 = (connections == 0)
+    idxs = torch.linspace(0, connections.shape[0]-1, connections.shape[0]).to(int)
+    idxs = connections * idxs # now we have a matrix of indices. 
+
     edge_dict = {}
 
-    for j in range(connections.shape[1]):
-        edge_dict[node_names[j]] = [node_names[ii] for ii in range(len(node_names)) if connections[:, j].tolist()[ii] == 1]
+    for i in range(connections.shape[0]):
+        i_idxs = idxs[i, (~mask_0[i, ])].tolist() 
+
+        if i_idxs == []:
+            pass
+        else:
+            edge_dict = edge_dict | {node_names[i]: [node_names[j] for j in i_idxs]}
 
     return edge_dict
 
