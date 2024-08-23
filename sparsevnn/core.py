@@ -3,8 +3,8 @@
 # %% auto 0
 __all__ = ['name_cleanup', 'dict_to_digraph', 'rand_connection_matrix', 'connection_matrix_to_dict', 'connection_dict_to_matrix',
            'SparseLinearCustom', 'VNNHelper', 'mk_NodeGroups', 'structured_layer_info', 'expand_edge_dict',
-           'Linear_block', 'Conv1D_x2_Max_block', 'reverse_edge_dict', 'reverse_node_props', 'vertex_subsequent',
-           'vertex_between', 'vertex_from_end', 'Linear_block_reps', 'VisableNeuralNetwork']
+           'MarkerDataset', 'Linear_block', 'Conv1D_x2_Max_block', 'reverse_edge_dict', 'reverse_node_props',
+           'vertex_subsequent', 'vertex_between', 'vertex_from_end', 'Linear_block_reps', 'VisableNeuralNetwork']
 
 # %% ../nbs/00_core.ipynb 2
 import numpy as np
@@ -77,7 +77,7 @@ def dict_to_digraph(edge_dict):
             dot.edge(value, key)    
     return dot
 
-# %% ../nbs/00_core.ipynb 12
+# %% ../nbs/00_core.ipynb 10
 def rand_connection_matrix(num_nodes:int = 10 # number of nodes in graph
                            )-> torch.tensor: # Tensor with 1's representing connections
     "Returns a nxn matrix with zeros on the diagonal and lower half. A 1 indicates the column depends on that row."  
@@ -91,13 +91,16 @@ def rand_connection_matrix(num_nodes:int = 10 # number of nodes in graph
                 break
     return out
 
-# %% ../nbs/00_core.ipynb 13
+# %% ../nbs/00_core.ipynb 11
 def connection_matrix_to_dict(
     connections:torch.tensor , # Tensor with 1's representing connections between nodes. A random one can be generated with `rand_connection_matrix` 
     node_names = None # Optional list of names for the nodes. If none is provided nodes will be named "0" to "n".
     )-> dict:
     "Convert a matrix represenation of a graph to a dictionary of the edges structured as `{<parent>:[<children>], ... }`"
+    print('This function is deprecated. Please see `sparsevnn.util.convert_connections`')
     connections = connections.to(int)
+    if node_names == None:
+        node_names = [str(i) for i in range(connections.shape[0])]
     # in connections 0 is no connection. But since we are getting indices and a connection _could_ be at index 0 if these are shuffled we mask the empty connections before multiplying
     mask_0 = (connections == 0)
     idxs = torch.linspace(0, connections.shape[0]-1, connections.shape[0]).to(int)
@@ -112,13 +115,19 @@ def connection_matrix_to_dict(
             pass
         else:
             edge_dict = edge_dict | {node_names[i]: [node_names[j] for j in i_idxs]}
+    # add any nodes that have no children as {a:[]} to be compliant with original version
+    edge_dict = edge_dict | {
+        e:[] for e in 
+        list(set(sum([edge_dict[k] for k in edge_dict.keys()], [])))
+        if e not in edge_dict.keys()}
 
     return edge_dict
 
-# %% ../nbs/00_core.ipynb 14
+# %% ../nbs/00_core.ipynb 12
 def connection_dict_to_matrix(edge_dict:dict # Dictionary representation of of a graph's edges structured as `{<parent>:[<children>], ... }`
                               )->torch.tensor:
     "Convert a dictionary of a graph's edges into a tensor with 1's representing connections between nodes."
+    print('This function is deprecated. Please see `sparsevnn.util.convert_connections`')
     keys = edge_dict.keys()
     key2num = dict(zip(keys, [i for i in range(len(keys))]))
 
@@ -129,7 +138,7 @@ def connection_dict_to_matrix(edge_dict:dict # Dictionary representation of of a
             out[key2num[depend], key2num[key]] = 1
     return out
 
-# %% ../nbs/00_core.ipynb 19
+# %% ../nbs/00_core.ipynb 17
 class SparseLinearCustom(nn.Module):
     """Applies a linear transformation to the incoming data: :math:`y = xA^T + b`
     
@@ -457,7 +466,7 @@ class SparseLinearCustom(nn.Module):
             self.in_features, self.out_features, self.bias is not None, self.sparsity, self.connectivity, self.small_world
         )
 
-# %% ../nbs/00_core.ipynb 21
+# %% ../nbs/00_core.ipynb 19
 class VNNHelper():
     def __init__(self, edge_dict, all_values_are_nodes = True) -> None:
         self.edge_dict = edge_dict.copy()
@@ -594,7 +603,7 @@ class VNNHelper():
                 dot.edge(value, key)    
         return dot
 
-# %% ../nbs/00_core.ipynb 23
+# %% ../nbs/00_core.ipynb 21
 # wrapper to make description dictionary
 def mk_NodeGroups(edge_dict, dependancy_order):    # for using sparse matrix implementation
         # Take a pass through the dependency order and check that each node comes after all of its dependanies.
@@ -681,7 +690,7 @@ def mk_NodeGroups(edge_dict, dependancy_order):    # for using sparse matrix imp
                     print('exit') 
         return dd
 
-# %% ../nbs/00_core.ipynb 25
+# %% ../nbs/00_core.ipynb 23
 class structured_layer_info:
     def __init__(self, i, 
                  node_groups,  
@@ -690,6 +699,8 @@ class structured_layer_info:
                       #      'eye': [
                  node_props, # {'KeggOrthology(Ko)[Br-Zma00001]': {'out': 1, 'reps': 1, 'drop': 0.0, 'inp': 7},
                  edge_dict,
+                 inp_tensor_nucleotides= 4, # What's the length of the nucleotide dimension? Used to calculate the start/stop positions of the input idx in the 0th layer.
+                 inp_tensor_lookup = None, # Optional to lookup node idx for the input tensor. This is important if two genes might share snps (e.g. two genes fall in between markers)
                  as_sparse = False
                  ):
         dd = node_groups # used to be called description dictionary. TODO replace in below.
@@ -706,8 +717,8 @@ class structured_layer_info:
         col_nodes = [e for e in self.col_out+self.col_eye]
 
         if i == min(dd.keys()):
-            # print('check')
             row_sizes = [node_props[e]['inp'] for e in row_nodes]
+            # print(row_sizes)
         else:
             row_sizes = [node_props[e]['out'] for e in row_nodes]
         col_sizes = [node_props[e]['out'] for e in col_nodes]
@@ -715,6 +726,8 @@ class structured_layer_info:
         row_sizes = torch.Tensor(row_sizes).to(torch.int)
         row_stop  = torch.cumsum(row_sizes, 0)
         row_start = torch.concat([torch.Tensor([0]).to(torch.int), row_stop[0:-1]])
+        # print(row_start)
+        # print(row_stop)
 
         col_sizes = torch.Tensor(col_sizes).to(torch.int)
         col_stop  = torch.cumsum(col_sizes, 0)
@@ -735,6 +748,29 @@ class structured_layer_info:
                 'stop':  col_stop[j],
                 'start': col_start[j],
             }
+
+        if inp_tensor_lookup != None:
+            for key in self.row_info.keys():
+                idxs = inp_tensor_lookup[key]
+
+                overwrite_row_start = torch.tensor(
+                    min(idxs)*inp_tensor_nucleotides).to(torch.int)
+                # offset by number of nucleotides because this will be flattened.
+                overwrite_row_stop  = torch.tensor(
+                    max(idxs)*inp_tensor_nucleotides).to(torch.int) + inp_tensor_nucleotides
+
+                self.row_info[key]['start'] = overwrite_row_start
+                self.row_info[key]['stop']  = overwrite_row_stop
+
+                assert (overwrite_row_stop - overwrite_row_start) == self.row_info[key]['size'] 
+            
+            # Overwrite the row_stop list with a entry list. We only need the last value of the list to init the weight matix
+            # if not as_sparse
+            max_idx = max(sum([inp_node_idx_dict[k] for k in inp_node_idx_dict], []))
+            max_idx = (max_idx*inp_tensor_nucleotides)+inp_tensor_nucleotides
+            row_stop = [max_idx]
+
+        
     
         # bias shape does not change based on sparse/none
         self.bias            = torch.zeros([              col_stop[-1]])
@@ -937,7 +973,6 @@ class structured_layer_info:
             #         self.w_eye_acc_values 
             #         )    
             
-
             self.weight_grad_bool = None
             if self.w_acc_indices != None:
                 # self.weight_grad_bool = torch.sparse_coo_tensor(
@@ -1032,7 +1067,7 @@ class structured_layer_info:
 # RuntimeError: The expanded size of the tensor (8) must match the existing size (12) at non-singleton dimension 1.  Target sizes: [12, 8].  Tensor sizes: [8, 12]
 
 
-# %% ../nbs/00_core.ipynb 26
+# %% ../nbs/00_core.ipynb 24
 # Expand node replicates (to have multiple layers per node)
 
 def expand_edge_dict(vnn_helper, edge_dict):
@@ -1073,7 +1108,52 @@ def expand_edge_dict(vnn_helper, edge_dict):
             for val in values]
     return edge_dict_expanded
 
-# %% ../nbs/00_core.ipynb 29
+# %% ../nbs/00_core.ipynb 25
+def _dist_scale_function(out:int, # output size of a node 
+                         dist: int, # Distance from the output node 
+                         decay_rate: float | int # 0 or positive number. 0 will apply no decay
+                         )->int:
+    "Scale a value (node output size) as out = (1/(1+decay*dist)) * out, rounding with a minimum of 1."
+
+    scale = 1/(1+decay_rate*dist)
+    out = round(scale * out)
+    out = max(1, out)
+    return out
+
+# %% ../nbs/00_core.ipynb 33
+class MarkerDataset(Dataset):
+    def __init__(
+            self,
+            lookup_obs, # (n,) idxs containing a subset of idxs in y
+            lookup_geno,# (obs, 3) Pheno_Idx, Geno_Idx, Is_Phno (technically only the first two are needed)
+            y, # (obs, yvars)
+            G  # (genotypes, snps*nucleotides )
+    ):
+        self.lookup_obs = lookup_obs
+        self.lookup_geno = lookup_geno
+        self.y = y
+        self.G = G
+        
+    def __len__(self):
+        return len(self.lookup_obs)
+
+    # These used to be in __getitem__ but separating them like this allows for them to be overwritten more easily
+    def get_y(self, idx):
+        y_idx = self.y[idx]
+        return(y_idx)
+        
+    def get_G(self, idx):
+        geno_idx = self.lookup_geno[idx, 1]
+        G_idx = self.G[geno_idx]
+        return(G_idx)
+    
+    def __getitem__(self, idx):
+        out = []
+        obs_idx = idx
+
+        return [self.get_y(obs_idx), self.get_G(obs_idx)]
+
+# %% ../nbs/00_core.ipynb 36
 def Linear_block(in_size, out_size, drop_pr):
     block = nn.Sequential(
         nn.Linear(in_size, out_size),
@@ -1082,7 +1162,7 @@ def Linear_block(in_size, out_size, drop_pr):
     )
     return(block) 
 
-# %% ../nbs/00_core.ipynb 31
+# %% ../nbs/00_core.ipynb 38
 def Conv1D_x2_Max_block(in_channels, out_channels, kernel_size, stride, maxpool_size):
     block = nn.Sequential(
         nn.Conv1d(
@@ -1102,7 +1182,7 @@ def Conv1D_x2_Max_block(in_channels, out_channels, kernel_size, stride, maxpool_
     )
     return(block)
 
-# %% ../nbs/00_core.ipynb 36
+# %% ../nbs/00_core.ipynb 43
 def reverse_edge_dict(edge_dict):
     # Reverse connection directions. Connections are not one to one so it's not as simple as swapping keys/values
     edge_dict_reversed = {}
@@ -1128,7 +1208,7 @@ def reverse_edge_dict(edge_dict):
 
     return edge_dict_reversed
 
-# %% ../nbs/00_core.ipynb 37
+# %% ../nbs/00_core.ipynb 44
 def reverse_node_props(prop_dict, 
                        conversion_dict = {'out':'inp',
                                           'inp':'out',
@@ -1149,7 +1229,7 @@ def reverse_node_props(prop_dict,
 
 
 
-# %% ../nbs/00_core.ipynb 40
+# %% ../nbs/00_core.ipynb 47
 # consider only one pair of nodes
 def vertex_subsequent(
     edge_dict,
@@ -1174,7 +1254,7 @@ def vertex_subsequent(
                 query_list = sum([edge_dict[e] for e in [ee for ee in query_list if ee in edge_dict.keys()]], [])
         return None
 
-# %% ../nbs/00_core.ipynb 41
+# %% ../nbs/00_core.ipynb 48
 def vertex_between(
     edge_dict,
     node0,
@@ -1192,7 +1272,7 @@ def vertex_between(
             end =node0)
     return res 
 
-# %% ../nbs/00_core.ipynb 42
+# %% ../nbs/00_core.ipynb 49
 def vertex_from_end(
         edge_dict,
         end 
@@ -1230,7 +1310,7 @@ def vertex_from_end(
 
     return out
 
-# %% ../nbs/00_core.ipynb 44
+# %% ../nbs/00_core.ipynb 51
 def Linear_block_reps(in_size, out_size, drop_pr, block_reps):
     block_list = []
     for i in range(block_reps):
@@ -1248,7 +1328,7 @@ def Linear_block_reps(in_size, out_size, drop_pr, block_reps):
     block = nn.ModuleList(block_list)
     return(block)     
 
-# %% ../nbs/00_core.ipynb 45
+# %% ../nbs/00_core.ipynb 52
 class VisableNeuralNetwork(nn.Module):
     def __init__(self, 
                  node_props, 
