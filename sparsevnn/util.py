@@ -2,7 +2,8 @@
 
 # %% auto 0
 __all__ = ['read_vcf', 'vcf_table_to_matrix', 'hmp_table_to_matrix', 'd_to_df', 'df_to_d', 'd_to_t', 't_to_d', 'df_to_t',
-           't_to_df', 'convert_connections', 'order_connections']
+           't_to_df', 'convert_connections', 'order_connections', 'intersect_cxn_gff_nodes', 'acgt_filter_taxa',
+           'acgt_filter_snps', 'filter_connection_df', 'mk_vnnhelper']
 
 # %% ../nbs/02_GraphDataUtils.ipynb 3
 import io
@@ -422,7 +423,7 @@ def _get_kegg2ncbi(
 
     return res
 
-# %% ../nbs/02_GraphDataUtils.ipynb 26
+# %% ../nbs/02_GraphDataUtils.ipynb 25
 def d_to_df(inp:dict)-> pd.DataFrame:
     out = pd.DataFrame(
         sum(
@@ -437,7 +438,7 @@ def d_to_df(inp:dict)-> pd.DataFrame:
              )
     return out
 
-# %% ../nbs/02_GraphDataUtils.ipynb 27
+# %% ../nbs/02_GraphDataUtils.ipynb 26
 def df_to_d(inp:pd.DataFrame)->dict:
     edge_dict = {}
     keys = list(set(inp.src.tolist()))
@@ -446,7 +447,7 @@ def df_to_d(inp:pd.DataFrame)->dict:
     return edge_dict
 
 
-# %% ../nbs/02_GraphDataUtils.ipynb 28
+# %% ../nbs/02_GraphDataUtils.ipynb 27
 def d_to_t(inp:dict)->tuple:
     src   = list(inp.keys())
     tgt   = list(set(sum([inp[k] for k in src], [])))
@@ -462,7 +463,7 @@ def d_to_t(inp:dict)->tuple:
     return out, nodes
 
 
-# %% ../nbs/02_GraphDataUtils.ipynb 29
+# %% ../nbs/02_GraphDataUtils.ipynb 28
 def t_to_d(inp:torch.tensor, nodes:list)->dict:
     idxs = torch.linspace(0, len(nodes)-1, len(nodes)).to(int)
     not0 = inp != 0
@@ -481,7 +482,7 @@ def t_to_d(inp:torch.tensor, nodes:list)->dict:
     return out
 
 
-# %% ../nbs/02_GraphDataUtils.ipynb 30
+# %% ../nbs/02_GraphDataUtils.ipynb 29
 def df_to_t(inp:pd.DataFrame)->tuple:    
     src   = list(set(inp.src.tolist()))
     tgt   = list(set(inp.tgt.tolist()))
@@ -495,7 +496,7 @@ def df_to_t(inp:pd.DataFrame)->tuple:
 
     return out, nodes
 
-# %% ../nbs/02_GraphDataUtils.ipynb 31
+# %% ../nbs/02_GraphDataUtils.ipynb 30
 def t_to_df(inp:torch.tensor, nodes:list)-> pd.DataFrame:
     idxs = torch.linspace(0, len(nodes)-1, len(nodes)).to(int)
     not0 = inp != 0
@@ -509,7 +510,7 @@ def t_to_df(inp:torch.tensor, nodes:list)-> pd.DataFrame:
     out = pd.DataFrame(sum(out, []), columns=['src', 'tgt'])
     return out
 
-# %% ../nbs/02_GraphDataUtils.ipynb 34
+# %% ../nbs/02_GraphDataUtils.ipynb 33
 def convert_connections(
         inp, # Graphs as a dict of {parent: [children]}, nxn tensor with 0/1 for connections, or a dataframe of src,targets
         to: str, # Output representation 'dict', 'tensor', 'DataFrame'
@@ -538,7 +539,7 @@ def convert_connections(
         case _:
             return None
 
-# %% ../nbs/02_GraphDataUtils.ipynb 37
+# %% ../nbs/02_GraphDataUtils.ipynb 36
 def order_connections(
         inp, # Representation of a graph -- dict, dataframe, or tensor.
         node_names = None # Optional, but should be used for tensor representations. Otherwise nodes will be numbered.
@@ -580,3 +581,279 @@ def order_connections(
 
     out = out | {max(list(out.keys()))+1: inp_nodes}
     return out
+
+# %% ../nbs/02_GraphDataUtils.ipynb 39
+def intersect_cxn_gff_nodes(gff, cxn, kegg2ncbi):
+    # gff, cxn, kegg2ncbi -> gene_nodes_gff (?)gff w/ col
+    species = list(kegg2ncbi.keys())[0].split(':')[0]
+
+    nodes = list(set(cxn.src.tolist()+cxn.tgt.tolist()))
+    # since the lamda deals with missing entries below we don't need to filter the inputs
+    # gene_nodes = [e for e in nodes if re.match('\d+.*', e)]
+    gene_nodes = nodes
+
+    gene_nodes = pd.DataFrame(zip(
+        gene_nodes,
+        [f"{species}:{e.split(' ')[0]}" for e in gene_nodes]), columns=['cxn', 'kegg'])
+
+    gene_nodes['ncbi']= [# lambda to deal with missing values
+        (lambda x: kegg2ncbi[x] if x in kegg2ncbi.keys() else '')(e) 
+        for e in gene_nodes.kegg.tolist()]
+
+    # Transform Dbxref and join
+    gff['ncbi'] = [f"ncbi-geneid:{e.split(':')[-1]}" for e in gff['Dbxref'].tolist()]
+
+    gene_nodes_gff = gene_nodes.merge(gff, how='inner')
+    gene_nodes_gff = gene_nodes_gff.sort_values(['chromosome', 'start', 'end']).reset_index(drop=True)
+
+    print('\n'.join(
+        ['Grouping\t| Count', 
+        '--------\t| -----'
+        ]+[f'{i}\t| {j}' for i,j in zip(
+            ['All KEGG Nodes', 'GFF Nodes', 'Intersection'],
+            [e.shape[0] for e in [gene_nodes, gff, gene_nodes_gff]]
+            )]))
+
+    return gene_nodes_gff
+
+# %% ../nbs/02_GraphDataUtils.ipynb 40
+def acgt_filter_taxa(acgt, acgt_taxa, shared_taxa):
+    # acgt_filter_taxa acgt, acgt_taxa, shared_taxa -> acgt taxa2idx
+    # Make sure the order of the taxa in acgt are as expected
+    # currently dims are taxa, nucleotide, length
+    print(f'acgt shape is {acgt.shape}. Confirm taxa is the 0th axis.')
+
+    taxa2idx = {k:v for v,k in enumerate(acgt_taxa)}
+    acgt = acgt[[taxa2idx[e] for e in shared_taxa], :, :]
+    return(acgt, taxa2idx)
+
+
+
+# %% ../nbs/02_GraphDataUtils.ipynb 41
+def acgt_filter_snps(acgt, 
+                     acgt_loci, 
+                     gene_nodes_gff, 
+                     include_adj = True):
+    
+    acgt_loci = acgt_loci.reset_index().rename(columns={'index':'acgt_l_idx'})
+    # acgt_l_idx	chrom	pos
+    # 	        0	1	24952
+    #       	1	1	26003
+
+    # acgt_loci.head()
+
+
+
+    # A  B  C  D  E  F    <- snps sampled
+    #    #######          <- geneic region
+    # 
+    # we return indexs for [A, B, C, D, E]
+    # 
+    # Whereas for gene:
+    # A  B  C  D  E  F    <- snps sampled
+    #      #              <- geneic region
+    # 
+    # we return indexs for [B, C] since there are not indexes within the gene
+    #
+    # and for gene:
+    # A  B  C  D  E  F    <- snps sampled
+    #                   # <- geneic region
+    # 
+    # we return indexs for [F] since there is no snp sampled at a higher position.
+
+    # make sure we're working with ints
+    acgt_loci.chrom = acgt_loci.chrom.astype(int)
+    acgt_loci.pos   = acgt_loci.pos.astype(int)
+
+    out = {}
+
+    for i in gene_nodes_gff.index:
+        node, chromosome, start, end = gene_nodes_gff.loc[i, ['cxn', 'chromosome', 'start', 'end']].tolist()
+        node, chromosome, start, end = str(node), int(chromosome), int(start), int(end)
+        # node, chromosome, start, end
+
+        chrom_mask = (acgt_loci.chrom == chromosome)
+
+        res = []
+        if include_adj:
+            # index that's closest but below the gene
+            res += acgt_loci.loc[
+                (chrom_mask & (acgt_loci.pos < start)), 
+                ['acgt_l_idx']].max().tolist()
+
+        # indexes within gene
+        res += acgt_loci.loc[
+            (chrom_mask & 
+            ((acgt_loci.pos >= start) &
+            (acgt_loci.pos <= end))
+            ), 
+            'acgt_l_idx'].tolist()
+
+        if include_adj:
+            # index that's closest but above the gene
+            res += acgt_loci.loc[
+                (chrom_mask & (acgt_loci.pos > end)), 
+                ['acgt_l_idx']].min().tolist()
+        
+        # drop nans
+        res = [e for e in res if e == e]
+        out = out | {node:res}
+
+
+
+    # Do we actually need the full set of genome snp indices or can we drop some?
+    used_snps = sorted(list(set(sum([out[e] for e in out.keys()], []))))
+    print(f'Using {len(used_snps)} of {acgt.shape[-1]} SNPs ({round(100*(len(used_snps) / acgt.shape[-1]), 3)}%)')
+
+
+
+    # Reduce the snp dim of acgt and then update all the references in out. 
+    idxorig2reduced = {k:i for i,k in enumerate(used_snps)}
+    acgt = acgt[:, :, used_snps]
+
+    out = {
+        k:[idxorig2reduced[e] for e in v] 
+        for k,v in 
+        [(k, out[k]) for k in out.keys()]}
+
+    inp_node_idx_dict = out.copy()
+
+        
+    return (acgt, inp_node_idx_dict)
+
+# %% ../nbs/02_GraphDataUtils.ipynb 42
+def filter_connection_df(cxn, gene_nodes_gff):
+
+    # Filter the input nodes to only those that we have a gene model for. 
+
+    # This should be run multiple times until there are no nodes that are either
+    # 1. Leaves that have no snps
+    # 2. Branches without leaves that have no snps.
+
+    # Instead of using a while loop, we iterate over the number of nodes. 
+    print('Removing nodes without SNPs:')
+    for itr in range(len(list(set(cxn.tgt+cxn.src)))):
+        # The input nodes will be targets but not sources
+        tgt =  list(set(cxn.tgt))
+        src =  list(set(cxn.src))
+        
+        inp_nodes = [e for e in tgt if e not in src]
+        # here are the input nodes that we don't have a gene model for.
+        inp_nodes_prune = [e for e in inp_nodes if e not in gene_nodes_gff.cxn.tolist()]
+        print(f'{itr}: {len(inp_nodes_prune)} of {len(inp_nodes)} ({round(100*(len(inp_nodes_prune)/len(inp_nodes)), 3)} %)')
+        cxn = cxn.loc[~(cxn.tgt.isin(inp_nodes_prune)), ]
+        if inp_nodes_prune == []:
+            break
+
+    cxn = cxn.reset_index(drop=True)
+    return cxn
+
+# %% ../nbs/02_GraphDataUtils.ipynb 43
+def mk_vnnhelper(
+        edge_dict,
+        inp_tensor_lookup,
+        num_nucleotides = 4, # this could also be 1 for major/minor allele. 
+        params = {
+            'default_out_nodes_inp'  : 1,
+            'default_out_nodes_edge' : 1,
+            'default_out_nodes_out'  : 1, #TODO set this based on the dimensions of y
+
+            'default_drop_nodes_inp' : 0.0,
+            'default_drop_nodes_edge': 0.0,
+            'default_drop_nodes_out' : 0.0,
+
+            'default_reps_nodes_inp' : 1,
+            'default_reps_nodes_edge': 1,
+            'default_reps_nodes_out' : 1,
+
+            'default_decay_rate'     : 0
+            }
+            ):
+    import sparsevnn.core   
+    # older code assumes that a graph dictionary will contain leaves as keys with [] children. 
+    # to accomodate this behavior we're going to 
+    # 1. check if there are any nodes that are not keys and
+    # 2. if there are spike them in. 
+    all_nodes = list(set(sum([[k]+edge_dict[k] for k in edge_dict.keys()], [])))
+    absent_nodes = {e:[] for e in all_nodes if e not in edge_dict.keys()}
+    if absent_nodes != {}:
+        edge_dict = edge_dict | absent_nodes
+    # Now we don't need to worry about which structure the connection dict has
+
+    myvnn = sparsevnn.core.VNNHelper(edge_dict = edge_dict)
+
+    # We need to set attributes of the VNNHelper so the edges can be calculated.
+
+    myvnn.set_node_props(
+        key = 'inp', 
+        node_val_zip = zip(
+            myvnn.nodes_inp, 
+            [len(inp_tensor_lookup[e])*num_nucleotides for e in myvnn.nodes_inp]
+            ))
+
+    myvnn.set_node_props(
+        key = 'flatten', 
+        node_val_zip = zip(myvnn.nodes_inp, [True for e in myvnn.nodes_inp]))
+
+    for node_group in ['nodes_inp', 'nodes_edge', 'nodes_out']:
+        for attr_type in ['out', 'drop', 'reps']:
+            myvnn.set_node_props(
+                key= attr_type, 
+                node_val_zip=zip(
+                    myvnn.__getattribute__(node_group),
+                    [params[f'default_{attr_type}_{node_group}']   # repeat relevant default value
+                    for e in myvnn.__getattribute__(node_group)]
+                    # an example version of this is 
+                    # myvnn.set_node_props(
+                    #     key = 'reps', 
+                    #     node_val_zip = zip(myvnn.nodes_inp, [default_reps_nodes_inp  for e in myvnn.nodes_inp]))
+            ))
+
+
+    # Scale node outputs by distance -----------------------------------------------
+    dist = sparsevnn.core.vertex_from_end(
+        edge_dict = myvnn.edge_dict,
+        end =myvnn.dependancy_order[-1]
+    )
+
+    # overwrite node outputs with a size inversely proportional to distance from prediction node
+    for query in list(dist.keys()):
+        myvnn.node_props[query]['out'] = sparsevnn.core._dist_scale_function(
+            out = myvnn.node_props[query]['out'],
+            dist = dist[query],
+            decay_rate = params['default_decay_rate'])
+        
+    # Expand out node replicates ---------------------------------------------------
+    nodes = [node for node in myvnn.dependancy_order if myvnn.node_props[node]['reps'] > 1]
+
+    node_expansion_dict = {
+        node: [node if i==0 else f'{node}_{i}' for i in range(myvnn.node_props[node]['reps'])]
+        for node in nodes}
+    #   current       1st          2nd (new)      3rd (new)
+    # {'100798274': ['100798274', '100798274_1', '100798274_2'], ...
+
+    # the keys don't change here. The values will be updated and then new k:v will be inserted
+    myvnn.edge_dict = {k:[e if e not in node_expansion_dict.keys() 
+        else node_expansion_dict[e][-1]
+        for e in myvnn.edge_dict[k] ] for k in myvnn.edge_dict}
+
+    # now insert connectsion to new nodes: A -> A_rep_1 -> A_rep_2
+    for node in node_expansion_dict:
+        for pair in zip(node_expansion_dict[node][1:], node_expansion_dict[node]):
+            myvnn.edge_dict[pair[0]] = [pair[1]]
+
+    # now add those new nodes
+    # create a new node for all the nodes
+    for node in node_expansion_dict:
+        for new_node in node_expansion_dict[node][1:]:
+            myvnn.node_props[new_node] = {k:myvnn.node_props[node][k] for k in myvnn.node_props[node] if k != 'inp'}
+
+
+    new_vnn = sparsevnn.core.VNNHelper(edge_dict= myvnn.edge_dict)
+    new_vnn.node_props = myvnn.node_props
+    myvnn = new_vnn
+
+    # init edge node input size (propagate forward input/edge outpus)
+    myvnn.calc_edge_inp()
+    return myvnn
+
