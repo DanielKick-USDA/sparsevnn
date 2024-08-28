@@ -3,8 +3,9 @@
 # %% auto 0
 __all__ = ['name_cleanup', 'dict_to_digraph', 'rand_connection_matrix', 'connection_matrix_to_dict', 'connection_dict_to_matrix',
            'SparseLinearCustom', 'VNNHelper', 'mk_NodeGroups', 'structured_layer_info', 'expand_edge_dict',
-           'MarkerDataset', 'Linear_block', 'Conv1D_x2_Max_block', 'reverse_edge_dict', 'reverse_node_props',
-           'vertex_subsequent', 'vertex_between', 'vertex_from_end', 'Linear_block_reps', 'VisableNeuralNetwork']
+           'info_list_to_layer_list', 'SparseVNN', 'plDNN_general', 'MarkerDataset', 'Linear_block',
+           'Conv1D_x2_Max_block', 'reverse_edge_dict', 'reverse_node_props', 'vertex_subsequent', 'vertex_between',
+           'vertex_from_end', 'Linear_block_reps', 'VisableNeuralNetwork']
 
 # %% ../nbs/00_core.ipynb 2
 import numpy as np
@@ -21,6 +22,8 @@ import torch_sparse
 import re # name_cleanup
 
 from graphviz import Digraph
+
+import lightning as pl
 
 import plotly.express as px
 
@@ -766,7 +769,7 @@ class structured_layer_info:
             
             # Overwrite the row_stop list with a entry list. We only need the last value of the list to init the weight matix
             # if not as_sparse
-            max_idx = max(sum([inp_node_idx_dict[k] for k in inp_node_idx_dict], []))
+            max_idx = max(sum([inp_tensor_lookup[k] for k in inp_tensor_lookup], []))
             max_idx = (max_idx*inp_tensor_nucleotides)+inp_tensor_nucleotides
             row_stop = [max_idx]
 
@@ -973,6 +976,7 @@ class structured_layer_info:
             #         self.w_eye_acc_values 
             #         )    
             
+
             self.weight_grad_bool = None
             if self.w_acc_indices != None:
                 # self.weight_grad_bool = torch.sparse_coo_tensor(
@@ -1120,7 +1124,79 @@ def _dist_scale_function(out:int, # output size of a node
     out = max(1, out)
     return out
 
-# %% ../nbs/00_core.ipynb 33
+# %% ../nbs/00_core.ipynb 28
+def info_list_to_layer_list(
+        M_list:list, # "Matrix list", a list of `structured_layer_info` objects.
+        nonlinearity:F.relu = F.relu # What nonlinear layer should be added between neurons?
+        )->list:
+    "Convert `structured_layer_info` objects into `SparseLinearCustom` for `sparsevnn`. It used to be called vnn_factory_3"
+    layer_list = []
+    for i in range(len(M_list)):
+        
+        apply_nonlinear = None
+        if i+1 != len(M_list): # apply relu to all but the last layer
+            apply_nonlinear = nonlinearity
+        
+        l = SparseLinearCustom(
+            M_list[i].weight.shape[1], # have to transpose this?
+            M_list[i].weight.shape[0],
+            connectivity   = torch.LongTensor(M_list[i].weight.coalesce().indices()),
+            custom_weights = M_list[i].weight.coalesce().values(), 
+            custom_bias    = M_list[i].bias.clone().detach(), 
+            weight_grad_bool = M_list[i].weight_grad_bool, 
+            bias_grad_bool   = M_list[i].bias_grad_bool, #.to_sparse()#.indices()
+            dropout_p        = M_list[i].dropout_p,
+            nonlinear_transform= apply_nonlinear
+            )
+
+        layer_list += [l]
+        
+    return layer_list    
+
+# %% ../nbs/00_core.ipynb 30
+class SparseVNN(nn.Module):
+    def __init__(self, layer_list):
+        super(SparseVNN, self).__init__()
+        self.layer_list = nn.ModuleList(layer_list)
+ 
+    def forward(self, x):
+        for l in self.layer_list:
+            x = l(x)
+        return x
+
+# %% ../nbs/00_core.ipynb 32
+class plDNN_general(pl.LightningModule):
+    def __init__(self, mod, log_weight_stats = False):
+        super().__init__()
+        self.mod = mod
+        self.log_weight_stats = log_weight_stats
+        
+    def training_step(self, batch, batch_idx):
+        y_i, x_i = batch
+        pred = self.mod(x_i)
+        loss = F.mse_loss(pred, y_i)
+        self.log("train_loss", loss)
+        
+        if self.log_weight_stats:
+            with torch.no_grad():
+                weight_list=[(name, param) for name, param in self.mod.named_parameters() if name.split('.')[-1] == 'weight']
+                for l in weight_list:
+                    self.log(("train_mean"+l[0]), l[1].mean())
+                    self.log(("train_std"+l[0]), l[1].std())        
+
+        return(loss)
+        
+    def validation_step(self, batch, batch_idx):
+        y_i, x_i = batch
+        pred = self.mod(x_i)
+        loss = F.mse_loss(pred, y_i)
+        self.log('val_loss', loss)        
+     
+    def configure_optimizers(self, **kwargs):
+        optimizer = torch.optim.Adam(self.parameters(), **kwargs)
+        return optimizer
+
+# %% ../nbs/00_core.ipynb 34
 class MarkerDataset(Dataset):
     def __init__(
             self,
@@ -1153,7 +1229,7 @@ class MarkerDataset(Dataset):
 
         return [self.get_y(obs_idx), self.get_G(obs_idx)]
 
-# %% ../nbs/00_core.ipynb 36
+# %% ../nbs/00_core.ipynb 37
 def Linear_block(in_size, out_size, drop_pr):
     block = nn.Sequential(
         nn.Linear(in_size, out_size),
@@ -1162,7 +1238,7 @@ def Linear_block(in_size, out_size, drop_pr):
     )
     return(block) 
 
-# %% ../nbs/00_core.ipynb 38
+# %% ../nbs/00_core.ipynb 39
 def Conv1D_x2_Max_block(in_channels, out_channels, kernel_size, stride, maxpool_size):
     block = nn.Sequential(
         nn.Conv1d(
@@ -1182,7 +1258,7 @@ def Conv1D_x2_Max_block(in_channels, out_channels, kernel_size, stride, maxpool_
     )
     return(block)
 
-# %% ../nbs/00_core.ipynb 43
+# %% ../nbs/00_core.ipynb 44
 def reverse_edge_dict(edge_dict):
     # Reverse connection directions. Connections are not one to one so it's not as simple as swapping keys/values
     edge_dict_reversed = {}
@@ -1208,7 +1284,7 @@ def reverse_edge_dict(edge_dict):
 
     return edge_dict_reversed
 
-# %% ../nbs/00_core.ipynb 44
+# %% ../nbs/00_core.ipynb 45
 def reverse_node_props(prop_dict, 
                        conversion_dict = {'out':'inp',
                                           'inp':'out',
@@ -1229,7 +1305,7 @@ def reverse_node_props(prop_dict,
 
 
 
-# %% ../nbs/00_core.ipynb 47
+# %% ../nbs/00_core.ipynb 48
 # consider only one pair of nodes
 def vertex_subsequent(
     edge_dict,
@@ -1254,7 +1330,7 @@ def vertex_subsequent(
                 query_list = sum([edge_dict[e] for e in [ee for ee in query_list if ee in edge_dict.keys()]], [])
         return None
 
-# %% ../nbs/00_core.ipynb 48
+# %% ../nbs/00_core.ipynb 49
 def vertex_between(
     edge_dict,
     node0,
@@ -1272,7 +1348,7 @@ def vertex_between(
             end =node0)
     return res 
 
-# %% ../nbs/00_core.ipynb 49
+# %% ../nbs/00_core.ipynb 50
 def vertex_from_end(
         edge_dict,
         end 
@@ -1310,7 +1386,7 @@ def vertex_from_end(
 
     return out
 
-# %% ../nbs/00_core.ipynb 51
+# %% ../nbs/00_core.ipynb 52
 def Linear_block_reps(in_size, out_size, drop_pr, block_reps):
     block_list = []
     for i in range(block_reps):
@@ -1328,7 +1404,7 @@ def Linear_block_reps(in_size, out_size, drop_pr, block_reps):
     block = nn.ModuleList(block_list)
     return(block)     
 
-# %% ../nbs/00_core.ipynb 52
+# %% ../nbs/00_core.ipynb 53
 class VisableNeuralNetwork(nn.Module):
     def __init__(self, 
                  node_props, 
