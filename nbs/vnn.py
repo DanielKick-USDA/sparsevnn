@@ -1,0 +1,746 @@
+# import pprint
+# print = pprint.PrettyPrinter(indent=4).pprint
+
+import os, argparse, re
+# FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME
+# os.chdir('/home/kickd/Documents/sparsevnn/nbs/demo/') # FIXME FIXME FIXME
+# FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME
+import numpy  as np
+import pandas as pd
+
+import einops
+
+## Model building ====
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from   torch.utils.data import Dataset, DataLoader
+
+import sparsevnn
+import sparsevnn.util
+import sparsevnn.qol
+# from   sparsevnn.qol  import ensure_dir_path_exists
+from   sparsevnn.core import \
+    SparseLinearCustom,      \
+    _dist_scale_function,    \
+    info_list_to_layer_list, \
+    SparseVNN,               \
+    MarkerDataset,           \
+    VNNHelper,               \
+    structured_layer_info,   \
+    plDNN_general
+
+## Logging with Pytorch Lightning ====
+import lightning.pytorch as pl
+from   lightning.pytorch.loggers import CSVLogger # used to save the history of each trial (used by ax)
+
+## Adaptive Experimentation Platform ====
+from ax.service.ax_client import AxClient, ObjectiveProperties
+
+
+torch.set_float32_matmul_precision('medium')
+
+# Default values are stored in quality of life.
+params_data = sparsevnn.qol.params_data()
+params_run  = sparsevnn.qol.params_run()
+params      = sparsevnn.qol.params()
+params_list = sparsevnn.qol.params_list()
+# values in `params_data` and `params_run` are the only ones I expect to be updated
+params_data_keys = set(params_data.keys()).copy()
+params_run_keys  = set(params_run.keys()).copy()
+
+# Update Default Parameters ---------------------------------------------------
+# Default < JSON < Arguments
+
+parser = argparse.ArgumentParser()
+# JSON files for experiment settings
+parser.add_argument("--params_data", type=str, help="path to dict of `params_data` json")
+parser.add_argument("--params_run",  type=str, help="path to dict of `params_run` json")
+parser.add_argument("--params",      type=str, help="path to dict of `params` json")
+parser.add_argument("--params_list", type=str, help="path to dict of `params_list` json")
+
+# Small scale changes from default values
+## Data / Graph Str (most common expected changes) ====
+#TODO graph override with provided cxn table 
+# params_data settings
+parser.add_argument("--graph_cache_path", type=str, help="path to local graph files' storage.")
+parser.add_argument("--gff_path",         type=str, help="path to gene annotation gff.")
+parser.add_argument("--hmp_path",         type=str, help="path to hapmap file.")
+parser.add_argument("--phno_path",        type=str, help="path to phenotype file.")
+parser.add_argument("--cache_path",       type=str, help="path to *this* file's cache.")
+parser.add_argument("--model_path",       type=str, help="path to a trained model to be loaded.")
+
+parser.add_argument("--dataloader_shuffle_train",type=bool, help="should this dataloader shuffle data?")
+parser.add_argument("--dataloader_shuffle_valid",type=bool, help="should this dataloader shuffle data?")
+
+
+# params_run settings
+parser.add_argument("--batch_size",    type=int, help="batch size for dataloader")
+parser.add_argument("--max_epoch",     type=int, help="max epoch for training")
+parser.add_argument("--run_mode",      type=str, help="script run to `tune`, `train`, `predict`, or `eval`?")
+parser.add_argument("--tune_trials",   type=int, help="if `tune` how many trials should be run?")
+parser.add_argument("--tune_max",      type=int, help="if `tune` what is the maximum number of trials to be run?")
+parser.add_argument("--tune_force",    type=bool,help="if `tune` should trials be run even if there are `tune_max` already?")
+parser.add_argument("--train_from_ax", type=bool,help="if `train` should the best params from an Ax be used??")
+parser.add_argument("--train_save",    type=bool,help="if `train` should the model be saved?")
+
+args = parser.parse_args()
+
+## JSON parameter files =======================================================
+# in place update all k/v if an external file was passed.
+# if args.params_data: params_data |= sparsevnn.qol.read_json(json_path=args.params_data)
+# if args.params_run:  params_run  |= sparsevnn.qol.read_json(json_path=args.params_run)
+# if args.params:      params      |= sparsevnn.qol.read_json(json_path=args.params)
+# if args.params_list: params_list |= sparsevnn.qol.read_json(json_path=args.params_list)
+
+def _get_json_if_exists(
+        path, 
+        file, # File name or regex (e.g. '\.gff$')
+        is_regex = False
+        ):
+    res = {}
+    files = os.listdir(path=path)
+    if is_regex:
+        file = sorted([e for e in files if re.match(file, e)])
+        if file != []:
+            file = file[0] 
+            res = sparsevnn.qol.read_json(json_path=path+file)
+    elif file in files:
+            res = sparsevnn.qol.read_json(json_path=path+file)
+
+    if res != {}: print(f'Loading and using {path+file}.')
+    return res
+
+
+if args.params_data:  
+    params_data |= sparsevnn.qol.read_json(json_path=args.params_data)
+else: 
+    params_data |= _get_json_if_exists( # This messy expression will use a user path if provided or will pull params_data
+        path = args.cache_path if args.cache_path else params_data['cache_path'],  
+        file = 'params_data.json', 
+        is_regex = False)
+    
+if args.params_run:  
+    params_run |= sparsevnn.qol.read_json(json_path=args.params_run)
+else: 
+    params_run |= _get_json_if_exists( # This messy expression will use a user path if provided or will pull params_run
+        path = args.cache_path if args.cache_path else params_data['cache_path'],  
+        file = 'params_run.json', 
+        is_regex = False)
+
+if args.params:  
+    params |= sparsevnn.qol.read_json(json_path=args.params)
+else: 
+    params |= _get_json_if_exists( # This messy expression will use a user path if provided or will pull params
+        path = args.cache_path if args.cache_path else params_data['cache_path'],  
+        file = 'params.json', 
+        is_regex = False)
+
+
+# the params_list for Ax is not so simple to merge. We have to pull the file, create an index based on the name key of 
+# the dictionaries and then update each matching dictionary. It's also possible (but unexpected) that new parameters
+# could be added here. To account for that any new parameters will be appended. 
+new_params = []
+if args.params_list:  
+    new_params = sparsevnn.qol.read_json(json_path=args.params_list)
+else: 
+    new_params = _get_json_if_exists( # This messy expression will use a user path if provided or will pull params_list
+        path = args.cache_path if args.cache_path else params_data['cache_path'],  
+        file = 'params_list.json', 
+        is_regex = False)
+if new_params != []:
+    # find what entries have the same names, update them
+    params_list_lookup = {e['name']:i for i,e in enumerate(params_list)}
+    for entry in new_params:
+        if entry['name'] in params_list_lookup:
+            # index of dict in list
+            i = params_list_lookup[entry['name']]
+            # update that entry in the list
+            params_list[i] |= entry
+        else:
+            # otherwise append to end
+            params_list.append(entry)
+    del params_list_lookup
+        
+
+# It'll be most common to change the input files. The other paramters have so many values the would be inconvenient to provide as args.
+# if args.graph_cache_path: params_data['graph_cache_path'] = args.graph_cache_path
+# if args.gff_path:         params_data['gff_path']         = args.gff_path
+# if args.hmp_path:         params_data['hmp_path']         = args.hmp_path
+# if args.phno_path:        params_data['phno_path']        = args.phno_path
+# if args.cache_path:       params_data['cache_path']       = args.cache_path
+# if args.model_path:       params_data['model_path']       = args.model_path
+
+## Individudal Arguments ======================================================
+# Update each dict with the approprate args
+for k in params_data_keys:
+    if hasattr(args, k):
+        _ = getattr(args, k)
+        if _ != None:
+            params_data[k] = _
+
+for k in params_run_keys: 
+    if hasattr(args, k):
+        _ = getattr(args, k)
+        if _ != None:
+            params_run[k] = _
+
+
+# if not specified, look in the cache path for a file ending in csv, gff, hmp.txt
+possible_files = os.listdir(params_data['cache_path'])
+if params_data['gff_path'] == None:
+    _ = sorted([e for e in possible_files if re.match('.*\.gff$', e)])
+    if _ != []:
+        _ = _[0]
+        params_data['gff_path'] = _
+        print(f'No `gff_path` specified. Proceeding with {_}.')
+
+if params_data['hmp_path'] == None:
+    _ = sorted([e for e in possible_files if re.match('.*\.hmp\.txt$', e)])
+    if _ != []:
+        _ = _[0]
+        params_data['hmp_path'] = _
+        print(f'No `hmp_path` specified. Proceeding with {_}.')
+
+if params_data['phno_path'] == None:
+    _ = sorted([e for e in possible_files if re.match('.*\.csv$', e)])
+    if _ != []:
+        _ = 'phno.csv' if 'phno.csv' in _ else _[0] # use phno.csv if it exists, otherwise guess
+        params_data['phno_path'] = _
+        print(f'No `phno_path` specified. Proceeding with {_}.')
+
+
+# for reference write out these param dicts
+_ = [
+    sparsevnn.qol.write_json(a, f"{params_data['cache_path']}{b}.json") 
+    for a,b in zip([params_data, params_run, params, params_list],
+                   ['params_data', 'params_run', 'params', 'params_list'])
+    # if not os.path.exists(f'{params_data['cache_path']}{b}.json')
+                    ]
+
+
+## Make Global Variables ======================================================
+
+cache_path = params_data['cache_path']
+if cache_path == './': # in this case we can't get a meaniful value unless we use the pwd
+    cache_path = os.getcwd()+'/'
+lightning_log_dir = cache_path+"lightning"
+exp_name = [e for e in cache_path.split('/') if e != ''][-1]
+sparsevnn.qol.ensure_dir_path_exists(dir_path = cache_path)
+sparsevnn.qol.ensure_dir_path_exists(dir_path = lightning_log_dir)
+
+# Load Input Data -------------------------------------------------------------
+## Load Marker Data ===========================================================
+hmp = pd.read_table(params_data['hmp_path'])
+hmp = hmp.sort_values(['chrom', 'pos']).reset_index(drop=True)
+acgt= sparsevnn.util.hmp_table_to_matrix(hmp)
+
+# Currently acgt is in a "rotation" (order of dimenisons) that was convenient for its creation. 
+# We'll rotate it from snps, genotype, prob. -> genotype, prob., snps which is the order we need for the model.
+acgt = einops.rearrange(acgt, 's g p -> g p s')
+acgt_loci = hmp.loc[:, ['chrom', 'pos']]
+acgt_taxa = [e for e in list(hmp) 
+    if e not in ['rs#', 'alleles', 'chrom', 'pos', 'strand', 'assembly#', 'center', 'protLSID', 'assayLSID', 'panelLSID', 'QCcode']]
+
+
+## Load Response Data =========================================================
+# Taxa, y1, y2 ...
+phno = pd.read_csv(params_data['phno_path'])
+
+# Filter Taxa based on availability
+phno_taxa   = list(set(phno.Taxa.tolist()))
+shared_taxa = sorted([e for e in phno_taxa if e in acgt_taxa])
+
+phno = phno.loc[(phno.Taxa.isin(shared_taxa)), ].reset_index(drop = True)
+
+y = np.array(phno.drop(columns='Taxa'))
+y_names = list(phno.drop(columns='Taxa'))
+print(f'The output array is of shape {y.shape}.')
+
+
+## Prepare Lookup Tables ======================================================
+unique_geno = phno.loc[:, ['Taxa']].drop_duplicates().reset_index(drop=True).reset_index().rename(columns={'index':'Geno_Idx'})
+
+unique_geno = phno.loc[:, ['Taxa']].drop_duplicates(
+).reset_index().rename(columns={'index':'Is_Phno'}
+).sort_values('Taxa'                                # These are sorted to mirror `shared_taxa`
+).reset_index().rename(columns={'index':'Geno_Idx'}
+)
+# unique_geno.head()
+
+obs_geno_lookup = phno.loc[:, ['Taxa']
+                           ].reset_index(
+                           ).rename(columns={'index':'Phno_Idx'}
+                           ).merge(unique_geno, how='outer'
+                           ).drop(columns = ['Taxa'])
+# obs_geno_lookup
+
+
+# Build Graph Structure -------------------------------------------------------
+# (Download if necessary)
+# catalog = sparsevnn.util._get_available_catalog(species = 'gmx')
+inp = sparsevnn.util._get_json(species = params_data['species'], 
+                               catalog_num = params_data['kegg_catalog'], 
+                               cache = True, 
+                               cache_dir = params_data['graph_cache_path'])
+inp = sparsevnn.util._peel(inp=inp)
+cxn = sparsevnn.util._connections_from_peeled_json(inp, max_iter = 1000, 
+                                                   print_queue_len = False)
+cxn = pd.DataFrame(cxn, columns=['src', 'tgt'])
+# cxn.head()
+
+
+# Match graph inputs to gene models (parsing GFF annotation file)
+kegg2ncbi = sparsevnn.util._get_kegg2ncbi(species = params_data['species'], 
+                                          cache = True, 
+                                          cache_dir = params_data['graph_cache_path'])
+ncbi2kegg = {kegg2ncbi[k]:k for k in kegg2ncbi}
+
+
+# For this example I have downloaded a genome annotation from NCBI: https://www.ncbi.nlm.nih.gov/datasets/genome/GCF_000004515.6/ . 
+gff = sparsevnn.util._read_gene_annotation_table(filepath = params_data['gff_path'])
+gff = sparsevnn.util._gene_annotation_table_expand_attributes(gff)
+# project chromosome over rows
+gff = gff.loc[(gff.chromosome.notna()), ['seqid', 'chromosome']].merge( gff.drop(columns=['chromosome']) )
+# select columns
+gff = gff.loc[(gff.type == 'gene'), ['chromosome', 'start', 'end', 'ID', 'Dbxref']]
+# Drop any without a known chromosome.
+gff = gff.loc[(gff.chromosome != 'Unknown')]
+# gff.head()
+
+
+# Now we can use `kegg2ncbi` to match up the input nodes with those that have a ncbi-geneid
+gene_nodes_gff = sparsevnn.util.intersect_cxn_gff_nodes(
+    gff=gff,
+    cxn=cxn,
+    kegg2ncbi=kegg2ncbi
+    )
+
+
+# FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME
+# FIXME - As a test case I'm choosing a handful of genes that overlap in some of their input snps. 
+# This overlap will occur most frequently when genes fall in between markers because then we're using values from the nearest two markers. 
+# We want to make sure that the input matrix is not concatenated slices per gene. If it is, then we duplicate (potentially) many values. 
+
+# Here are a few that should have overlapping values. 
+_ = { 
+    '100793480 uncharacterized protein LOC100793480\tK03039 PSMD13; 26S proteasome regulatory subunit N9': [34, 35],
+    '100798066 vacuolar protein sorting-associated protein 25 isoform X1\tK12189 VPS25; ESCRT-II complex subunit VPS25': [34, 35],
+
+    '100813174 pectinesterase PPME1\tK01051 E3.1.1.11; pectinesterase [EC:3.1.1.11]': [158, 159],
+    '100816036 pectinesterase PPME1\tK01051 E3.1.1.11; pectinesterase [EC:3.1.1.11]': [158, 159],
+    '100306177 putative pectinesterase precursor\tK01051 E3.1.1.11; pectinesterase [EC:3.1.1.11]': [158, 159],
+
+    '100785374 transcription factor MYB53\tK09422 MYBP; transcription factor MYB, plant': [160, 161]
+    }
+
+# We now have a way to match the connections in the graph to positions in the genome by the chromosome, start, end fields. 
+gene_nodes_gff = gene_nodes_gff.loc[gene_nodes_gff.cxn.isin(_.keys()), ].reset_index(drop = True)
+# FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME
+
+cxn = sparsevnn.util.filter_connection_df(cxn = cxn, gene_nodes_gff = gene_nodes_gff)
+
+
+## Update Genotype Data =======================================================
+
+# confirm that shared_taxa and the geno_index have the same order 
+assert False == (False in [i == j for i,j in zip(
+    unique_geno.sort_values('Geno_Idx').reset_index(drop=True).Taxa.tolist(), 
+    shared_taxa)])
+
+
+acgt, taxa2idx = sparsevnn.util.acgt_filter_taxa(
+    acgt=acgt,
+    acgt_taxa=acgt_taxa,
+    shared_taxa=shared_taxa)
+
+# Here is one way of linking snps to genes. Instead of finding snps within a given gene we look for the indices that are closest to or within.  
+
+acgt, inp_node_idx_dict = sparsevnn.util.acgt_filter_snps(
+    acgt = acgt, 
+    acgt_loci = acgt_loci, 
+    gene_nodes_gff = gene_nodes_gff, 
+    include_adj = True)
+
+# Training Prep. --------------------------------------------------------------
+## Model Prep. ================================================================
+cxn_dict = sparsevnn.util.convert_connections(inp=cxn, to='dict', node_names=None)
+
+myvnn = sparsevnn.util.mk_vnnhelper(
+        edge_dict = cxn_dict,
+        num_nucleotides = 4, # this could also be 1 for major/minor allele. 
+        inp_tensor_lookup = inp_node_idx_dict,
+        params = params
+            )
+
+# start of vnn_factory_2 replacement
+# dependancy_order = sparsevnn.util.order_connections(inp = myvnn.edge_dict, node_names=None)
+dd = sparsevnn.core.mk_NodeGroups(edge_dict=myvnn.edge_dict, dependancy_order=myvnn.dependancy_order)
+# dd.keys()
+
+M_list = [
+    structured_layer_info(
+    i = ii, 
+    node_groups=dd, 
+    node_props=myvnn.node_props, 
+    edge_dict=myvnn.edge_dict, 
+    as_sparse=True,
+    inp_tensor_nucleotides= 4,
+    # lambda to only provide the lookup for the 0th grouping (input level)
+    inp_tensor_lookup = (lambda x: inp_node_idx_dict if x == 0 else None)(ii)
+    )
+    for ii in sorted(list(dd.keys()))]
+
+# [list(e.weight.shape) for e in M_list]
+
+print('\n'.join(
+    ['Layer\tinp\tout\teye'
+    ]+[f"{k}\t{len(dd[k]['inp'])}\t{len(dd[k]['out'])}\t{len(dd[k]['eye'])}" for k in dd]
+    ))
+
+## Dataloader Prep. ===========================================================
+match params_data['holdout_type']:
+    case 'percent':
+        print(r'Setting Holdout as #% of Taxa')
+        _ = obs_geno_lookup.Geno_Idx.drop_duplicates().tolist().copy()
+
+        rng = np.random.default_rng(params_data['holdout_seed'])
+        rng.shuffle(_)
+
+        tst_cutoff = round(len(_) * params_data['holdout_percent'])
+        tst_Geno_Idx = _[0:tst_cutoff]
+        trn_Geno_Idx = _[tst_cutoff:]
+
+    case 'taxa':
+        print(r'Setting Holdout as specific Taxa')
+
+        _ = phno['Taxa'].drop_duplicates().reset_index().rename(columns={'index':'Is_Phno'})
+
+        mask = (_.Taxa.isin(params_data['holdout_taxa']))
+        tst_Geno_Idx = set(_.loc[  mask,  ['Is_Phno']].merge(obs_geno_lookup).loc[:, 'Geno_Idx'])
+        trn_Geno_Idx = set(_.loc[~(mask), ['Is_Phno']].merge(obs_geno_lookup).loc[:, 'Geno_Idx'])
+
+
+train_idx = obs_geno_lookup.loc[(obs_geno_lookup.Geno_Idx.isin(trn_Geno_Idx)), 'Phno_Idx'].tolist()
+test_idx  = obs_geno_lookup.loc[(obs_geno_lookup.Geno_Idx.isin(tst_Geno_Idx)), 'Phno_Idx'].tolist()
+
+print(f'Train:\t{len(train_idx)}\nTest:\t{len(test_idx)}\nHolding out {round( 100*len(test_idx)/(len(train_idx)+len(test_idx)) , 3)}%')
+
+
+acgt_tensor = torch.from_numpy(acgt
+                  ).to(torch.float
+                  ).swapaxes(1,2 # obs, nucleotide, length -> obs, length, nucleotide so that
+                  ).reshape(acgt.shape[0], -1) # reshape will but the nucleotides right next to each other. This will make the gene lookup make sense.
+
+
+y = torch.from_numpy(y
+                  ).to(torch.float
+                  )
+
+y_c = y[train_idx].mean(axis=0)
+y_s = y[train_idx].std(axis=0)
+
+y = (y - y_c)/y_s
+
+
+
+training_dataloader = DataLoader(
+    MarkerDataset(
+        lookup_obs = torch.from_numpy(np.array(train_idx)),
+        G = acgt_tensor,
+        y = y.to(torch.float32),
+        lookup_geno = torch.from_numpy(obs_geno_lookup.to_numpy())
+        ),
+        batch_size = params_run['batch_size'],
+        shuffle = params_data['dataloader_shuffle_train']
+)
+
+validation_dataloader = DataLoader(
+    MarkerDataset(
+        lookup_obs = torch.from_numpy(np.array(test_idx)),
+        G = acgt_tensor,
+        y = y.to(torch.float32),
+        lookup_geno = torch.from_numpy(obs_geno_lookup.to_numpy())
+        ),
+        batch_size = params_run['batch_size'],
+        shuffle = params_data['dataloader_shuffle_valid']  
+)
+
+# next(iter(training_dataloader))
+
+## Customizable Training Functions ============================================
+def train_one_model(
+    params = params,
+    params_data = params_data,
+    params_run = params_run,
+    edge_dict = cxn_dict,
+    inp_tensor_lookup = inp_node_idx_dict,
+    log_dir = lightning_log_dir # This is explicit istead of using the global scope so that hyps/training can log different dirs. 
+    ):
+
+    myvnn = sparsevnn.util.mk_vnnhelper(
+            edge_dict = edge_dict,
+            num_nucleotides = params_data['num_nucleotides'], # this could also be 1 for major/minor allele. 
+            inp_tensor_lookup = inp_tensor_lookup,
+            params = params
+                )
+
+    dd = sparsevnn.core.mk_NodeGroups(edge_dict=myvnn.edge_dict, dependancy_order=myvnn.dependancy_order)
+
+    M_list = [
+        structured_layer_info(
+        i = ii, 
+        node_groups=dd, 
+        node_props=myvnn.node_props, 
+        edge_dict=myvnn.edge_dict, 
+        as_sparse=True,
+        inp_tensor_nucleotides= params_data['num_nucleotides'],
+        # lambda to only provide the lookup for the 0th grouping (input level)
+        inp_tensor_lookup = (lambda x: inp_tensor_lookup if x == 0 else None)(ii)
+        )
+        for ii in sorted(list(dd.keys()))]
+
+    layer_list = info_list_to_layer_list(M_list = M_list, nonlinearity = F.relu)
+    model      = SparseVNN(layer_list = layer_list)
+    VNN        = plDNN_general(model)
+    optimizer = VNN.configure_optimizers()
+    logger    = CSVLogger(log_dir, name=exp_name)
+    logger.log_hyperparams(params={
+        'params': params,
+        'params_data': params_data,
+        'params_run': params_run
+    })
+    trainer = pl.Trainer(max_epochs=params_run['max_epoch'], logger=logger)
+    trainer.fit(model=VNN, train_dataloaders=training_dataloader, val_dataloaders=validation_dataloader)
+    return trainer
+
+
+
+def vnn_from_state_dict(
+    state_dict_path = None,
+    params = params,
+    params_data = params_data,
+    edge_dict = cxn_dict,
+    inp_tensor_lookup = inp_node_idx_dict,
+    ):
+    myvnn = sparsevnn.util.mk_vnnhelper(
+            edge_dict = edge_dict,
+            num_nucleotides = params_data['num_nucleotides'], # this could also be 1 for major/minor allele. 
+            inp_tensor_lookup = inp_tensor_lookup,
+            params = params
+                )
+
+    dd = sparsevnn.core.mk_NodeGroups(edge_dict=myvnn.edge_dict, dependancy_order=myvnn.dependancy_order)
+
+    M_list = [
+        structured_layer_info(
+        i = ii, 
+        node_groups=dd, 
+        node_props=myvnn.node_props, 
+        edge_dict=myvnn.edge_dict, 
+        as_sparse=True,
+        inp_tensor_nucleotides= params_data['num_nucleotides'],
+        # lambda to only provide the lookup for the 0th grouping (input level)
+        inp_tensor_lookup = (lambda x: inp_tensor_lookup if x == 0 else None)(ii)
+        )
+        for ii in sorted(list(dd.keys()))]
+
+    layer_list = info_list_to_layer_list(M_list = M_list, nonlinearity = F.relu)
+    model      = SparseVNN(layer_list = layer_list)
+    # now we load the state dict into the model
+    model.load_state_dict(torch.load(state_dict_path))
+    return model
+
+
+
+def evaluate(parameterization):
+    "This is for Ax's use which is why it pulls variables from the global scope."
+    _ = train_one_model(
+        params = parameterization,
+        edge_dict = cxn_dict,
+        inp_tensor_lookup = inp_node_idx_dict,
+        log_dir = lightning_log_dir
+    )
+    # if we were optimizing number of training epochs this would be an effective loss to use.
+    # trainer.callback_metrics['train_loss']
+    # float(trainer.callback_metrics['train_loss'])
+    # To potentially _overtrain_ models and still let the selction be based on their best possible performance,
+    # I'll use the lowest average error in an epoch
+    log_path = lightning_log_dir+'/'+exp_name
+    fls = os.listdir(log_path)
+    nums = [int(e.split('_')[-1]) for e in fls] 
+
+    M = pd.read_csv(log_path+f"/version_{max(nums)}/metrics.csv")
+    M = M.loc[:, ['epoch', 'train_loss']].dropna()
+
+    M = M.groupby('epoch').agg(
+        train_loss = ('train_loss', 'mean'),
+        train_loss_sd = ('train_loss', 'std'),
+        ).reset_index()
+
+    train_metric = M.train_loss.min()
+    print(train_metric)
+    _ = {"train_loss": (train_metric, 0.0)}
+    return _
+
+
+
+# Model Execution -------------------------------------------------------------
+json_path = f"{lightning_log_dir}/{exp_name}.json"
+
+match params_run['run_mode']:
+    case 'tune':
+        # overwrite params_list's output with the size with the right output size. Don't allow the user to enter the wrong value. 
+        # This means we don't need to worry much about re-using these values. 
+        i = [i for i in range(len(params_list)) if params_list[i]['name'] == 'default_out_nodes_out'][0]
+        params_list[i]['value'] = y.shape[1]
+
+        # Load ax json if it exists
+        loaded_json = False
+        if os.path.exists(json_path): 
+            ax_client = (AxClient.load_from_json_file(filepath = json_path))
+            loaded_json = True
+        else:
+            ax_client = AxClient()
+            ax_client.create_experiment(
+                name=exp_name,
+                parameters=params_list,
+                objectives={"train_loss": ObjectiveProperties(minimize=True)}
+            )
+        
+        # Check if running hyps is forced or if we haven't yet reached tune_max
+        run_trials_bool = True
+        if params_run['tune_force'] == False:
+            if loaded_json: 
+                # check if we've reached the max number of hyperparamters combinations to test
+                if params_run['tune_max'] <= (ax_client.generation_strategy.trials_as_df.index.max()+1):
+                    run_trials_bool = False
+
+        # Run trials 
+        if run_trials_bool:
+            for i in range(params_run['tune_trials']):
+                parameterization, trial_index = ax_client.get_next_trial()
+                # Local evaluation here can be replaced with deployment to external system.
+                ax_client.complete_trial(trial_index=trial_index, raw_data=evaluate(parameterization)) #                                                                     FIXME
+
+            ax_client.save_to_json_file(filepath = json_path)
+
+    case 'train':
+        params['default_out_nodes_out'] = y.shape[1]
+
+        if params_run['train_from_ax']:
+            if os.path.exists(json_path): 
+                ax_client = (AxClient.load_from_json_file(filepath = json_path))
+                params, _ = ax_client.get_best_parameters()
+            else:
+                print('Ax client not found! Using default.')
+
+        model_log_dir = '/'.join(lightning_log_dir.split('/')[0:-1]+['models'])
+        
+        res = train_one_model(
+            params = params,
+            params_data = params_data,
+            params_run = params_run,
+            edge_dict = cxn_dict,
+            inp_tensor_lookup = inp_node_idx_dict,
+            log_dir= model_log_dir
+            )
+        
+        if params_run['train_save']:
+            # save with the same numbering that pytorch lightning's record used
+            log_path = model_log_dir+'/'+exp_name
+            fls = os.listdir(log_path)
+            nums = [int(e.split('_')[-1]) for e in fls]
+            torch.save(res.model.mod.state_dict(), 
+                       f'{log_path}/version_{max(nums)}/version_{max(nums)}.pt')
+            sparsevnn.qol.write_json(params, 
+                                     f'{log_path}/version_{max(nums)}/version_{max(nums)}.json')
+            # torch.save(res.model.mod, 
+            #            f'{log_path}/version_{max(nums)}/version_{max(nums)}.pt')
+                                
+    case 'predict':
+        # need to load params that are specifically associated with the saved model.
+        # otherwise there's a chance the hyperparameters will have changed.
+        res = vnn_from_state_dict(
+            state_dict_path = params_data['model_path'],
+            # Here we read in the associated json in case the model specification is different
+            # from the current params file.
+            params = sparsevnn.qol.read_json('.'.join(params_data['model_path'].split('.')[0:-1]+['json'])),
+            # params = params,
+            params_data = params_data,
+            edge_dict = cxn_dict,
+            inp_tensor_lookup = inp_node_idx_dict,
+            ) 
+        res = res.eval()
+
+        save_dir = '/'.join(params_data['model_path'].split('/')[0:-1])
+        np.savetxt(save_dir+'/y_c.csv', y_c.numpy(), delimiter=",")
+        np.savetxt(save_dir+'/y_s.csv', y_s.numpy(), delimiter=",")
+        
+        if params_data['dataloader_shuffle_valid'] == False:
+            yvar = [] # as a sanity check we'll save the true y's. That will allow for 
+            yhat = []
+
+            # only get the validation dataloader if the training dataloader is shuffled.
+            for i, (y,x) in enumerate(validation_dataloader):
+                yvar.append(      y.detach().cpu() )
+                yhat.append( res(x).detach().cpu() )
+
+            yvar = pd.DataFrame(torch.concat(yvar).numpy(), columns=y_names)
+            yvar['Phno_Idx'] = test_idx
+            yvar['Split'] = 'Validation'
+
+            yhat = pd.DataFrame(torch.concat(yhat).numpy(), columns=y_names)
+            yhat['Phno_Idx'] = test_idx
+            yhat['Split'] = 'Validation'
+
+            # save_dir = '/'.join(params_data['model_path'].split('/')[0:-1])
+
+            yvar.merge(obs_geno_lookup).to_csv(save_dir+'/yvar_validation.csv', index=False)
+            yhat.merge(obs_geno_lookup).to_csv(save_dir+'/yhat_validation.csv', index=False)
+
+
+
+        if params_data['dataloader_shuffle_train'] == False:
+            yvar = [] # as a sanity check we'll save the true y's. That will allow for 
+            yhat = []
+
+            # only get the validation dataloader if the training dataloader is shuffled.
+            for i, (y,x) in enumerate(training_dataloader):
+                yvar.append(      y.detach().cpu() )
+                yhat.append( res(x).detach().cpu() )
+
+            yvar = pd.DataFrame(torch.concat(yvar).numpy(), columns=y_names)
+            yvar['Phno_Idx'] = train_idx
+            yvar['Split'] = 'Training'
+
+            yhat = pd.DataFrame(torch.concat(yhat).numpy(), columns=y_names)
+            yhat['Phno_Idx'] = train_idx
+            yhat['Split'] = 'Training'
+
+            # save_dir = '/'.join(params_data['model_path'].split('/')[0:-1])
+
+            yvar.merge(obs_geno_lookup).to_csv(save_dir+'/yvar_training.csv', index=False)
+            yhat.merge(obs_geno_lookup).to_csv(save_dir+'/yhat_training.csv', index=False)
+            
+            
+        
+    case 'eval':
+        print('`eval` not implemented!!')
+
+
+    case _:
+        print('Base case not implemented!!')
+        
+
+
+
+
+
+
+## Model Prep. ================================================================
+# sparsevnn.util.intersect_cxn_gff_nodes
+# sparsevnn.util.acgt_filter_taxa
+# sparsevnn.util.acgt_filter_snps
+# sparsevnn.util.filter_connection_df
+# sparsevnn.util.mk_vnnhelper

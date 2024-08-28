@@ -4,7 +4,10 @@ website:
       - index.ipynb
       - 00_core.ipynb
       - 01_qol.ipynb
+      - 02_GraphDataUtils.ipynb
       - 10_IntroSparseLinear.ipynb
       - 11_FeaturesOfSparseLinear.ipynb
       - 12_HypotheticalGraph.ipynb
       - 13_MultilayerNodes.ipynb
+      - 14_NodeStatistics.ipynb
+      - 20_Tutorial.ipynb
