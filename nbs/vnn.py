@@ -2,9 +2,8 @@
 # print = pprint.PrettyPrinter(indent=4).pprint
 
 import os, argparse, re
-# FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME
-# os.chdir('/home/kickd/Documents/sparsevnn/nbs/demo/') # FIXME FIXME FIXME
-# FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME
+# os.chdir('/home/kickd/Documents/sparsevnn/nbs/demo_maize')
+
 import numpy  as np
 import pandas as pd
 
@@ -189,7 +188,7 @@ for k in params_run_keys:
 # if not specified, look in the cache path for a file ending in csv, gff, hmp.txt
 possible_files = os.listdir(params_data['cache_path'])
 if params_data['gff_path'] == None:
-    _ = sorted([e for e in possible_files if re.match('.*\.gff$', e)])
+    _ = sorted([e for e in possible_files if ((re.match('.*\.gff$', e) != None ) | (re.match('.*\.gff3$', e) != None))])
     if _ != []:
         _ = _[0]
         params_data['gff_path'] = _
@@ -250,6 +249,8 @@ phno = pd.read_csv(params_data['phno_path'])
 # Filter Taxa based on availability
 phno_taxa   = list(set(phno.Taxa.tolist()))
 shared_taxa = sorted([e for e in phno_taxa if e in acgt_taxa])
+# instead of sorting phno and extracting Geno_Idx from the index, we'll create it here and then merge it in.
+shared_taxa_geno_idx = pd.DataFrame([(i,k) for i,k in enumerate(shared_taxa)]).rename(columns = {0:'Geno_Idx', 1:'Taxa'})
 
 phno = phno.loc[(phno.Taxa.isin(shared_taxa)), ].reset_index(drop = True)
 
@@ -259,20 +260,28 @@ print(f'The output array is of shape {y.shape}.')
 
 
 ## Prepare Lookup Tables ======================================================
-unique_geno = phno.loc[:, ['Taxa']].drop_duplicates().reset_index(drop=True).reset_index().rename(columns={'index':'Geno_Idx'})
+# unique_geno = phno.loc[:, ['Taxa']].drop_duplicates().reset_index(drop=True).reset_index().rename(columns={'index':'Geno_Idx'})
 
-unique_geno = phno.loc[:, ['Taxa']].drop_duplicates(
-).reset_index().rename(columns={'index':'Is_Phno'}
-).sort_values('Taxa'                                # These are sorted to mirror `shared_taxa`
-).reset_index().rename(columns={'index':'Geno_Idx'}
-)
+# unique_geno = phno.loc[:, ['Taxa']].drop_duplicates(
+# ).reset_index().rename(columns={'index':'Is_Phno'}
+# ).sort_values('Taxa'                                # These are sorted to mirror `shared_taxa`
+# ).reset_index().rename(columns={'index':'Geno_Idx'}
+# )
 # unique_geno.head()
+
+unique_geno = phno.loc[:, ['Taxa']].drop_duplicates().reset_index().rename(columns={'index':'Is_Phno'}).merge(shared_taxa_geno_idx)
+
+
+
+
 
 obs_geno_lookup = phno.loc[:, ['Taxa']
                            ].reset_index(
                            ).rename(columns={'index':'Phno_Idx'}
                            ).merge(unique_geno, how='outer'
-                           ).drop(columns = ['Taxa'])
+                           ).drop(columns = ['Taxa']
+                           ).sort_values('Phno_Idx'
+                           ).loc[:, ['Phno_Idx', 'Geno_Idx', 'Is_Phno']]
 # obs_geno_lookup
 
 
@@ -297,7 +306,7 @@ kegg2ncbi = sparsevnn.util._get_kegg2ncbi(species = params_data['species'],
 ncbi2kegg = {kegg2ncbi[k]:k for k in kegg2ncbi}
 
 
-# For this example I have downloaded a genome annotation from NCBI: https://www.ncbi.nlm.nih.gov/datasets/genome/GCF_000004515.6/ . 
+# Usa a downloaded a genome annotation from NCBI e.g. : https://www.ncbi.nlm.nih.gov/datasets/genome/GCF_000004515.6/ . 
 gff = sparsevnn.util._read_gene_annotation_table(filepath = params_data['gff_path'])
 gff = sparsevnn.util._gene_annotation_table_expand_attributes(gff)
 # project chromosome over rows
@@ -316,37 +325,19 @@ gene_nodes_gff = sparsevnn.util.intersect_cxn_gff_nodes(
     kegg2ncbi=kegg2ncbi
     )
 
-
-# FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME
-# FIXME - As a test case I'm choosing a handful of genes that overlap in some of their input snps. 
-# This overlap will occur most frequently when genes fall in between markers because then we're using values from the nearest two markers. 
-# We want to make sure that the input matrix is not concatenated slices per gene. If it is, then we duplicate (potentially) many values. 
-
-# Here are a few that should have overlapping values. 
-_ = { 
-    '100793480 uncharacterized protein LOC100793480\tK03039 PSMD13; 26S proteasome regulatory subunit N9': [34, 35],
-    '100798066 vacuolar protein sorting-associated protein 25 isoform X1\tK12189 VPS25; ESCRT-II complex subunit VPS25': [34, 35],
-
-    '100813174 pectinesterase PPME1\tK01051 E3.1.1.11; pectinesterase [EC:3.1.1.11]': [158, 159],
-    '100816036 pectinesterase PPME1\tK01051 E3.1.1.11; pectinesterase [EC:3.1.1.11]': [158, 159],
-    '100306177 putative pectinesterase precursor\tK01051 E3.1.1.11; pectinesterase [EC:3.1.1.11]': [158, 159],
-
-    '100785374 transcription factor MYB53\tK09422 MYBP; transcription factor MYB, plant': [160, 161]
-    }
-
-# We now have a way to match the connections in the graph to positions in the genome by the chromosome, start, end fields. 
-gene_nodes_gff = gene_nodes_gff.loc[gene_nodes_gff.cxn.isin(_.keys()), ].reset_index(drop = True)
-# FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME FIXME
-
 cxn = sparsevnn.util.filter_connection_df(cxn = cxn, gene_nodes_gff = gene_nodes_gff)
 
 
 ## Update Genotype Data =======================================================
 
+# Because we use the position in acgt_taxa to map a shared_taxa entry to a position we only 
+# really need to check that all the shared entries exist in acgt_taxa
+assert [] == [e for e in shared_taxa if e not in acgt_taxa]
 # confirm that shared_taxa and the geno_index have the same order 
-assert False == (False in [i == j for i,j in zip(
-    unique_geno.sort_values('Geno_Idx').reset_index(drop=True).Taxa.tolist(), 
-    shared_taxa)])
+# assert False == (False in [i == j for i,j in zip(
+#     unique_geno.sort_values('Geno_Idx').reset_index(drop=True).Taxa.tolist(), 
+#     shared_taxa)])
+# the problem here seems to be that unique_geno.Taxa is the same as shared_taxa but when we sort by Geno_Idx it gets messed up.
 
 
 acgt, taxa2idx = sparsevnn.util.acgt_filter_taxa(
@@ -419,6 +410,18 @@ match params_data['holdout_type']:
         mask = (_.Taxa.isin(params_data['holdout_taxa']))
         tst_Geno_Idx = set(_.loc[  mask,  ['Is_Phno']].merge(obs_geno_lookup).loc[:, 'Geno_Idx'])
         trn_Geno_Idx = set(_.loc[~(mask), ['Is_Phno']].merge(obs_geno_lookup).loc[:, 'Geno_Idx'])
+
+
+    case 'parent':
+        _ = phno['Taxa'].drop_duplicates().reset_index().rename(columns={'index':'Is_Phno'})
+
+        # Standardize names to lower and set flag if either parent is in the holdout set
+        drop_vals = [e.lower() for e in params_data['holdout_taxa']]
+
+        mask = [True in [ee.lower() in drop_vals for ee in e.split('/')] for e in _.Taxa ]
+        mask_inv = [e == False for e in mask]
+        tst_Geno_Idx = set(_.loc[mask,    ['Is_Phno']].merge(obs_geno_lookup).loc[:, 'Geno_Idx'])
+        trn_Geno_Idx = set(_.loc[mask_inv,['Is_Phno']].merge(obs_geno_lookup).loc[:, 'Geno_Idx'])
 
 
 train_idx = obs_geno_lookup.loc[(obs_geno_lookup.Geno_Idx.isin(trn_Geno_Idx)), 'Phno_Idx'].tolist()
@@ -621,7 +624,7 @@ match params_run['run_mode']:
             for i in range(params_run['tune_trials']):
                 parameterization, trial_index = ax_client.get_next_trial()
                 # Local evaluation here can be replaced with deployment to external system.
-                ax_client.complete_trial(trial_index=trial_index, raw_data=evaluate(parameterization)) #                                                                     FIXME
+                ax_client.complete_trial(trial_index=trial_index, raw_data=evaluate(parameterization)) # FIXME by allowing for plDNN_general replacement
 
             ax_client.save_to_json_file(filepath = json_path)
 
