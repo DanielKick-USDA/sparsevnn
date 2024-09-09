@@ -3,9 +3,9 @@
 # %% auto 0
 __all__ = ['name_cleanup', 'dict_to_digraph', 'rand_connection_matrix', 'connection_matrix_to_dict', 'connection_dict_to_matrix',
            'SparseLinearCustom', 'VNNHelper', 'mk_NodeGroups', 'structured_layer_info', 'expand_edge_dict',
-           'info_list_to_layer_list', 'SparseVNN', 'plDNN_general', 'MarkerDataset', 'Linear_block',
-           'Conv1D_x2_Max_block', 'reverse_edge_dict', 'reverse_node_props', 'vertex_subsequent', 'vertex_between',
-           'vertex_from_end', 'Linear_block_reps', 'VisableNeuralNetwork']
+           'dist_scale_function', 'info_list_to_layer_list', 'SparseVNN', 'plDNN_general', 'MarkerDataset',
+           'Linear_block', 'Conv1D_x2_Max_block', 'reverse_edge_dict', 'reverse_node_props', 'vertex_subsequent',
+           'vertex_between', 'vertex_from_end', 'Linear_block_reps', 'VisableNeuralNetwork']
 
 # %% ../nbs/00_core.ipynb 2
 import numpy as np
@@ -1113,7 +1113,7 @@ def expand_edge_dict(vnn_helper, edge_dict):
     return edge_dict_expanded
 
 # %% ../nbs/00_core.ipynb 25
-def _dist_scale_function(out:int, # output size of a node 
+def dist_scale_function(out:int, # output size of a node 
                          dist: int, # Distance from the output node 
                          decay_rate: float | int # 0 or positive number. 0 will apply no decay
                          )->int:

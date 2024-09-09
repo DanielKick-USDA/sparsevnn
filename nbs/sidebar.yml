@@ -10,4 +10,9 @@ website:
       - 12_HypotheticalGraph.ipynb
       - 13_MultilayerNodes.ipynb
       - 14_NodeStatistics.ipynb
+      - 20_CLIOverview.ipynb
       - 20_Tutorial.ipynb
+      - 20_Tutorial_v1.ipynb
+      - section: demo_maize
+        contents:
+          - demo_maize/Untitled-1.ipynb

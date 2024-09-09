@@ -131,7 +131,7 @@ def remove_matching_files(
 
 # %% ../nbs/01_qol.ipynb 14
 def params_data(): return {
-    'species': 'gmx',
+    'species': None,
     'num_nucleotides': 4,
 
     ## paths
@@ -146,7 +146,7 @@ def params_data(): return {
     'graph_source': 'kegg',
     'kegg_catalog': '00001',
     ##
-    'holdout_type': 'percent', # percent, taxa
+    'holdout_type': 'percent', # percent, taxa, parent
     'holdout_percent': 0.2,
     'holdout_seed': 8923747,
     'holdout_taxa': [],
@@ -159,7 +159,7 @@ def params_data(): return {
 def params_run(): return {
     'batch_size': 32,
     'max_epoch' : 2,
-    'run_mode'  : 'tune', # modes: tune, train, predict, eval
+    'run_mode'  : 'setup', # modes: tune, train, predict, eval
     ## tune ====
     'tune_trials': 1,
     'tune_max'  : 1,
