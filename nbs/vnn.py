@@ -1,7 +1,8 @@
 # import pprint
 # print = pprint.PrettyPrinter(indent=4).pprint
 
-import os, argparse, re
+import os, argparse, re, json, hashlib
+
 # os.chdir('/home/kickd/Documents/sparsevnn/nbs/demo_maize')
 
 import numpy  as np
@@ -21,7 +22,7 @@ import sparsevnn.qol
 # from   sparsevnn.qol  import ensure_dir_path_exists
 from   sparsevnn.core import \
     SparseLinearCustom,      \
-    _dist_scale_function,    \
+    dist_scale_function,    \
     info_list_to_layer_list, \
     SparseVNN,               \
     MarkerDataset,           \
@@ -52,25 +53,42 @@ params_run_keys  = set(params_run.keys()).copy()
 # Default < JSON < Arguments
 
 parser = argparse.ArgumentParser()
+# Note type bool does not interpret the text following the flag as a bool, rather _passing_ the flag is a bool test
+# See https://stackoverflow.com/questions/60999816/argparse-not-parsing-boolean-arguments
+# and https://stackoverflow.com/questions/15008758/parsing-boolean-values-with-argparse/43357954#43357954
+def s2b(v):
+    "Credit to user [Maxim](https://stackoverflow.com/users/805502/maxim) "
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
 # JSON files for experiment settings
 parser.add_argument("--params_data", type=str, help="path to dict of `params_data` json")
 parser.add_argument("--params_run",  type=str, help="path to dict of `params_run` json")
 parser.add_argument("--params",      type=str, help="path to dict of `params` json")
 parser.add_argument("--params_list", type=str, help="path to dict of `params_list` json")
-
 # Small scale changes from default values
 ## Data / Graph Str (most common expected changes) ====
-#TODO graph override with provided cxn table 
+
 # params_data settings
+parser.add_argument("--species",          type=str, help="KEGG species code of the current organism.")
+parser.add_argument("--num_nucleotides",  type=int, help="length of the nucleotide dimension (usually 4 or 1).")
 parser.add_argument("--graph_cache_path", type=str, help="path to local graph files' storage.")
+parser.add_argument("--graph_source",     type=str, help="source of the graph. 'kegg' and 'local' are expected.")
+parser.add_argument("--graph_cxn",        type=str, help="path to local graph connection table if being used.")
 parser.add_argument("--gff_path",         type=str, help="path to gene annotation gff.")
 parser.add_argument("--hmp_path",         type=str, help="path to hapmap file.")
 parser.add_argument("--phno_path",        type=str, help="path to phenotype file.")
 parser.add_argument("--cache_path",       type=str, help="path to *this* file's cache.")
 parser.add_argument("--model_path",       type=str, help="path to a trained model to be loaded.")
 
-parser.add_argument("--dataloader_shuffle_train",type=bool, help="should this dataloader shuffle data?")
-parser.add_argument("--dataloader_shuffle_valid",type=bool, help="should this dataloader shuffle data?")
+parser.add_argument("--dataloader_shuffle_train",type=s2b, help="should this dataloader shuffle data?")
+parser.add_argument("--dataloader_shuffle_valid",type=s2b, help="should this dataloader shuffle data?")
 
 
 # params_run settings
@@ -79,11 +97,13 @@ parser.add_argument("--max_epoch",     type=int, help="max epoch for training")
 parser.add_argument("--run_mode",      type=str, help="script run to `tune`, `train`, `predict`, or `eval`?")
 parser.add_argument("--tune_trials",   type=int, help="if `tune` how many trials should be run?")
 parser.add_argument("--tune_max",      type=int, help="if `tune` what is the maximum number of trials to be run?")
-parser.add_argument("--tune_force",    type=bool,help="if `tune` should trials be run even if there are `tune_max` already?")
-parser.add_argument("--train_from_ax", type=bool,help="if `train` should the best params from an Ax be used??")
-parser.add_argument("--train_save",    type=bool,help="if `train` should the model be saved?")
+parser.add_argument("--tune_force",    type=s2b, help="if `tune` should trials be run even if there are `tune_max` already?")
+parser.add_argument("--train_from_ax", type=s2b, help="if `train` should the best params from an Ax be used??")
+parser.add_argument("--train_save",    type=s2b, help="if `train` should the model be saved?")
 
 args = parser.parse_args()
+
+
 
 ## JSON parameter files =======================================================
 # in place update all k/v if an external file was passed.
@@ -208,6 +228,42 @@ if params_data['phno_path'] == None:
         params_data['phno_path'] = _
         print(f'No `phno_path` specified. Proceeding with {_}.')
 
+## Store Intermediate Data For Reuse ==========================================
+# use_data_cache_load = True
+use_data_cache_save = True #FIXME
+# TODO add an option to use/ignore vnn_cache
+params_data_subset = {e:params_data[e] for e in [
+ 'species',
+ 'num_nucleotides',
+ 'graph_cache_path',
+ 'gff_path',
+ 'hmp_path',
+ 'phno_path',
+ 'graph_source',
+ 'kegg_catalog',
+ 'graph_cxn',   
+]}
+
+sparsevnn.qol.ensure_dir_path_exists(dir_path = './vnn_cache/')
+
+hash_lookup = {}
+if os.path.exists('./vnn_cache/hash_lookup.json'):
+    with open('./vnn_cache/hash_lookup.json', 'r') as f:
+        hash_lookup = json.load(f)
+
+# to ensure the hash is the same we sort the keys then use encode to get the stirng as bytes
+_ = json.dumps(params_data_subset, sort_keys=True).encode()
+# using shake_256 instead sha256 because https://stackoverflow.com/questions/4567089/hash-function-that-produces-short-hashes
+params_data_subset_hash = hashlib.shake_256( _ ).hexdigest(5)
+
+if params_data_subset_hash not in hash_lookup.keys():
+    use_data_cache_load = False
+    # add new hash
+    hash_lookup |= {str(params_data_subset_hash):params_data_subset}
+    sparsevnn.qol.write_json(hash_lookup, './vnn_cache/hash_lookup.json')
+else:
+    use_data_cache_load = True
+
 
 # for reference write out these param dicts
 _ = [
@@ -229,129 +285,169 @@ sparsevnn.qol.ensure_dir_path_exists(dir_path = cache_path)
 sparsevnn.qol.ensure_dir_path_exists(dir_path = lightning_log_dir)
 
 # Load Input Data -------------------------------------------------------------
-## Load Marker Data ===========================================================
-hmp = pd.read_table(params_data['hmp_path'])
-hmp = hmp.sort_values(['chrom', 'pos']).reset_index(drop=True)
-acgt= sparsevnn.util.hmp_table_to_matrix(hmp)
+if use_data_cache_load:
+    phno           = pd.read_csv(f'./vnn_cache/{params_data_subset_hash}_phno.csv')
+    obs_geno_lookup= pd.read_csv(f'./vnn_cache/{params_data_subset_hash}_obs_geno_lookup.csv')
+    cxn            = pd.read_csv(f'./vnn_cache/{params_data_subset_hash}_cxn.csv')
+    acgt_loci      = pd.read_csv(f'./vnn_cache/{params_data_subset_hash}_acgt_loci.csv')
+    gene_nodes_gff = pd.read_csv(f'./vnn_cache/{params_data_subset_hash}_gene_nodes_gff.csv')
 
-# Currently acgt is in a "rotation" (order of dimenisons) that was convenient for its creation. 
-# We'll rotate it from snps, genotype, prob. -> genotype, prob., snps which is the order we need for the model.
-acgt = einops.rearrange(acgt, 's g p -> g p s')
-acgt_loci = hmp.loc[:, ['chrom', 'pos']]
-acgt_taxa = [e for e in list(hmp) 
-    if e not in ['rs#', 'alleles', 'chrom', 'pos', 'strand', 'assembly#', 'center', 'protLSID', 'assayLSID', 'panelLSID', 'QCcode']]
+    acgt = np.load(f'./vnn_cache/{params_data_subset_hash}_acgt.npz')
+    acgt = acgt['acgt']
 
+    with open(f'./vnn_cache/{params_data_subset_hash}_inp_node_idx_dict.json', 'r') as f:
+        inp_node_idx_dict = json.load(f)
 
-## Load Response Data =========================================================
-# Taxa, y1, y2 ...
-phno = pd.read_csv(params_data['phno_path'])
+    # calculate 
+    y = np.array(phno.drop(columns='Taxa'))
+    y_names = list(phno.drop(columns='Taxa'))
 
-# Filter Taxa based on availability
-phno_taxa   = list(set(phno.Taxa.tolist()))
-shared_taxa = sorted([e for e in phno_taxa if e in acgt_taxa])
-# instead of sorting phno and extracting Geno_Idx from the index, we'll create it here and then merge it in.
-shared_taxa_geno_idx = pd.DataFrame([(i,k) for i,k in enumerate(shared_taxa)]).rename(columns = {0:'Geno_Idx', 1:'Taxa'})
+elif not use_data_cache_load:
+    ## Load Marker Data ===========================================================
+    hmp = pd.read_table(params_data['hmp_path'])
+    hmp = hmp.sort_values(['chrom', 'pos']).reset_index(drop=True)
+    acgt= sparsevnn.util.hmp_table_to_matrix(hmp)
 
-phno = phno.loc[(phno.Taxa.isin(shared_taxa)), ].reset_index(drop = True)
+    # Currently acgt is in a "rotation" (order of dimenisons) that was convenient for its creation. 
+    # We'll rotate it from snps, genotype, prob. -> genotype, prob., snps which is the order we need for the model.
+    acgt = einops.rearrange(acgt, 's g p -> g p s')
+    acgt_loci = hmp.loc[:, ['chrom', 'pos']]
+    acgt_taxa = [e for e in list(hmp) 
+        if e not in ['rs#', 'alleles', 'chrom', 'pos', 'strand', 'assembly#', 'center', 'protLSID', 'assayLSID', 'panelLSID', 'QCcode']]
 
-y = np.array(phno.drop(columns='Taxa'))
-y_names = list(phno.drop(columns='Taxa'))
-print(f'The output array is of shape {y.shape}.')
+    ## Load Response Data =========================================================
+    # Taxa, y1, y2 ...
+    phno = pd.read_csv(params_data['phno_path'])
 
+    # Filter Taxa based on availability
+    phno_taxa   = list(set(phno.Taxa.tolist()))
+    shared_taxa = sorted([e for e in phno_taxa if e in acgt_taxa])
+    # instead of sorting phno and extracting Geno_Idx from the index, we'll create it here and then merge it in.
+    shared_taxa_geno_idx = pd.DataFrame([(i,k) for i,k in enumerate(shared_taxa)]).rename(columns = {0:'Geno_Idx', 1:'Taxa'})
 
-## Prepare Lookup Tables ======================================================
-# unique_geno = phno.loc[:, ['Taxa']].drop_duplicates().reset_index(drop=True).reset_index().rename(columns={'index':'Geno_Idx'})
+    phno = phno.loc[(phno.Taxa.isin(shared_taxa)), ].reset_index(drop = True)
 
-# unique_geno = phno.loc[:, ['Taxa']].drop_duplicates(
-# ).reset_index().rename(columns={'index':'Is_Phno'}
-# ).sort_values('Taxa'                                # These are sorted to mirror `shared_taxa`
-# ).reset_index().rename(columns={'index':'Geno_Idx'}
-# )
-# unique_geno.head()
-
-unique_geno = phno.loc[:, ['Taxa']].drop_duplicates().reset_index().rename(columns={'index':'Is_Phno'}).merge(shared_taxa_geno_idx)
-
-
-
-
-
-obs_geno_lookup = phno.loc[:, ['Taxa']
-                           ].reset_index(
-                           ).rename(columns={'index':'Phno_Idx'}
-                           ).merge(unique_geno, how='outer'
-                           ).drop(columns = ['Taxa']
-                           ).sort_values('Phno_Idx'
-                           ).loc[:, ['Phno_Idx', 'Geno_Idx', 'Is_Phno']]
-# obs_geno_lookup
+    y = np.array(phno.drop(columns='Taxa'))
+    y_names = list(phno.drop(columns='Taxa'))
+    print(f'The output array is of shape {y.shape}.')
 
 
-# Build Graph Structure -------------------------------------------------------
-# (Download if necessary)
-# catalog = sparsevnn.util._get_available_catalog(species = 'gmx')
-inp = sparsevnn.util._get_json(species = params_data['species'], 
-                               catalog_num = params_data['kegg_catalog'], 
-                               cache = True, 
-                               cache_dir = params_data['graph_cache_path'])
-inp = sparsevnn.util._peel(inp=inp)
-cxn = sparsevnn.util._connections_from_peeled_json(inp, max_iter = 1000, 
-                                                   print_queue_len = False)
-cxn = pd.DataFrame(cxn, columns=['src', 'tgt'])
-# cxn.head()
+    ## Prepare Lookup Tables ======================================================
+    # unique_geno = phno.loc[:, ['Taxa']].drop_duplicates().reset_index(drop=True).reset_index().rename(columns={'index':'Geno_Idx'})
+
+    # unique_geno = phno.loc[:, ['Taxa']].drop_duplicates(
+    # ).reset_index().rename(columns={'index':'Is_Phno'}
+    # ).sort_values('Taxa'                                # These are sorted to mirror `shared_taxa`
+    # ).reset_index().rename(columns={'index':'Geno_Idx'}
+    # )
+    # unique_geno.head()
+
+    unique_geno = phno.loc[:, ['Taxa']].drop_duplicates().reset_index().rename(columns={'index':'Is_Phno'}).merge(shared_taxa_geno_idx)
 
 
-# Match graph inputs to gene models (parsing GFF annotation file)
-kegg2ncbi = sparsevnn.util._get_kegg2ncbi(species = params_data['species'], 
-                                          cache = True, 
-                                          cache_dir = params_data['graph_cache_path'])
-ncbi2kegg = {kegg2ncbi[k]:k for k in kegg2ncbi}
 
 
-# Usa a downloaded a genome annotation from NCBI e.g. : https://www.ncbi.nlm.nih.gov/datasets/genome/GCF_000004515.6/ . 
-gff = sparsevnn.util._read_gene_annotation_table(filepath = params_data['gff_path'])
-gff = sparsevnn.util._gene_annotation_table_expand_attributes(gff)
-# project chromosome over rows
-gff = gff.loc[(gff.chromosome.notna()), ['seqid', 'chromosome']].merge( gff.drop(columns=['chromosome']) )
-# select columns
-gff = gff.loc[(gff.type == 'gene'), ['chromosome', 'start', 'end', 'ID', 'Dbxref']]
-# Drop any without a known chromosome.
-gff = gff.loc[(gff.chromosome != 'Unknown')]
-# gff.head()
+
+    obs_geno_lookup = phno.loc[:, ['Taxa']
+                            ].reset_index(
+                            ).rename(columns={'index':'Phno_Idx'}
+                            ).merge(unique_geno, how='outer'
+                            ).drop(columns = ['Taxa']
+                            ).sort_values('Phno_Idx'
+                            ).loc[:, ['Phno_Idx', 'Geno_Idx', 'Is_Phno']]
+    # obs_geno_lookup
 
 
-# Now we can use `kegg2ncbi` to match up the input nodes with those that have a ncbi-geneid
-gene_nodes_gff = sparsevnn.util.intersect_cxn_gff_nodes(
-    gff=gff,
-    cxn=cxn,
-    kegg2ncbi=kegg2ncbi
-    )
+    # Build Graph Structure -------------------------------------------------------
+    match params_data['graph_source']:
+        case 'table':
+            cxn = pd.read_csv(params_data['graph_cxn'])
 
-cxn = sparsevnn.util.filter_connection_df(cxn = cxn, gene_nodes_gff = gene_nodes_gff)
-
-
-## Update Genotype Data =======================================================
-
-# Because we use the position in acgt_taxa to map a shared_taxa entry to a position we only 
-# really need to check that all the shared entries exist in acgt_taxa
-assert [] == [e for e in shared_taxa if e not in acgt_taxa]
-# confirm that shared_taxa and the geno_index have the same order 
-# assert False == (False in [i == j for i,j in zip(
-#     unique_geno.sort_values('Geno_Idx').reset_index(drop=True).Taxa.tolist(), 
-#     shared_taxa)])
-# the problem here seems to be that unique_geno.Taxa is the same as shared_taxa but when we sort by Geno_Idx it gets messed up.
+        case 'kegg':
+            # (Download if necessary)
+            # catalog = sparsevnn.util._get_available_catalog(species = 'gmx')
+            inp = sparsevnn.util._get_json(species = params_data['species'], 
+                                        catalog_num = params_data['kegg_catalog'], 
+                                        cache = True, 
+                                        cache_dir = params_data['graph_cache_path'])
+            inp = sparsevnn.util._peel(inp=inp)
+            cxn = sparsevnn.util._connections_from_peeled_json(inp, max_iter = 1000, 
+                                                            print_queue_len = False)
+            cxn = pd.DataFrame(cxn, columns=['src', 'tgt'])
+            # cxn.head()
 
 
-acgt, taxa2idx = sparsevnn.util.acgt_filter_taxa(
-    acgt=acgt,
-    acgt_taxa=acgt_taxa,
-    shared_taxa=shared_taxa)
 
-# Here is one way of linking snps to genes. Instead of finding snps within a given gene we look for the indices that are closest to or within.  
+    # Match graph inputs to gene models (parsing GFF annotation file)
+    kegg2ncbi = sparsevnn.util._get_kegg2ncbi(species = params_data['species'], 
+                                            cache = True, 
+                                            cache_dir = params_data['graph_cache_path'])
+    ncbi2kegg = {kegg2ncbi[k]:k for k in kegg2ncbi}
 
-acgt, inp_node_idx_dict = sparsevnn.util.acgt_filter_snps(
-    acgt = acgt, 
-    acgt_loci = acgt_loci, 
-    gene_nodes_gff = gene_nodes_gff, 
-    include_adj = True)
+
+
+    gff = sparsevnn.util._read_gene_annotation_table(filepath = params_data['gff_path'])
+    gff = sparsevnn.util._gene_annotation_table_expand_attributes(gff)
+    # project chromosome over rows
+    gff = gff.loc[(gff.chromosome.notna()), ['seqid', 'chromosome']].merge( gff.drop(columns=['chromosome']) )
+    # select columns
+    gff = gff.loc[(gff.type == 'gene'), ['chromosome', 'start', 'end', 'ID', 'Dbxref']]
+    # Drop any without a known chromosome.
+    gff = gff.loc[(gff.chromosome != 'Unknown')]
+    # gff.head()
+
+
+    # Now we can use `kegg2ncbi` to match up the input nodes with those that have a ncbi-geneid
+    gene_nodes_gff = sparsevnn.util.intersect_cxn_gff_nodes(
+        gff=gff,
+        cxn=cxn,
+        kegg2ncbi=kegg2ncbi
+        )
+
+    cxn = sparsevnn.util.filter_connection_df(cxn = cxn, gene_nodes_gff = gene_nodes_gff)
+
+
+    ## Update Genotype Data =======================================================
+
+    # Because we use the position in acgt_taxa to map a shared_taxa entry to a position we only 
+    # really need to check that all the shared entries exist in acgt_taxa
+    assert [] == [e for e in shared_taxa if e not in acgt_taxa]
+    # confirm that shared_taxa and the geno_index have the same order 
+    # assert False == (False in [i == j for i,j in zip(
+    #     unique_geno.sort_values('Geno_Idx').reset_index(drop=True).Taxa.tolist(), 
+    #     shared_taxa)])
+    # the problem here seems to be that unique_geno.Taxa is the same as shared_taxa but when we sort by Geno_Idx it gets messed up.
+
+
+    acgt, taxa2idx = sparsevnn.util.acgt_filter_taxa(
+        acgt=acgt,
+        acgt_taxa=acgt_taxa,
+        shared_taxa=shared_taxa)
+
+
+    # Here is one way of linking snps to genes. Instead of finding snps within a given gene we look for the indices that are closest to or within.  
+
+    acgt, inp_node_idx_dict = sparsevnn.util.acgt_filter_snps(
+        acgt = acgt, 
+        acgt_loci = acgt_loci, 
+        gene_nodes_gff = gene_nodes_gff, 
+        include_adj = True)
+    
+    if use_data_cache_save: 
+        ## Tables
+        phno.to_csv(f'./vnn_cache/{params_data_subset_hash}_phno.csv', index=False)
+        obs_geno_lookup.to_csv(f'./vnn_cache/{params_data_subset_hash}_obs_geno_lookup.csv', index=False)
+        cxn.to_csv(f'./vnn_cache/{params_data_subset_hash}_cxn.csv', index=False)
+        acgt_loci.to_csv(f'./vnn_cache/{params_data_subset_hash}_acgt_loci.csv', index=False)
+        gene_nodes_gff.to_csv(f'./vnn_cache/{params_data_subset_hash}_gene_nodes_gff.csv', index=False)
+        ## nd Array
+        np.savez_compressed(f'./vnn_cache/{params_data_subset_hash}_acgt.npz', acgt=acgt)
+
+        ## Dict
+        sparsevnn.qol.write_json(inp_node_idx_dict, f'./vnn_cache/{params_data_subset_hash}_inp_node_idx_dict.json') 
+
+
+
 
 # Training Prep. --------------------------------------------------------------
 ## Model Prep. ================================================================
@@ -376,7 +472,7 @@ M_list = [
     node_props=myvnn.node_props, 
     edge_dict=myvnn.edge_dict, 
     as_sparse=True,
-    inp_tensor_nucleotides= 4,
+    inp_tensor_nucleotides= params_data['num_nucleotides'],
     # lambda to only provide the lookup for the 0th grouping (input level)
     inp_tensor_lookup = (lambda x: inp_node_idx_dict if x == 0 else None)(ii)
     )
@@ -592,6 +688,8 @@ def evaluate(parameterization):
 json_path = f"{lightning_log_dir}/{exp_name}.json"
 
 match params_run['run_mode']:
+    case 'setup':
+        print('`setup` complete. Ready to `tune` or `train`.')
     case 'tune':
         # overwrite params_list's output with the size with the right output size. Don't allow the user to enter the wrong value. 
         # This means we don't need to worry much about re-using these values. 
@@ -699,8 +797,8 @@ match params_run['run_mode']:
 
             # save_dir = '/'.join(params_data['model_path'].split('/')[0:-1])
 
-            yvar.merge(obs_geno_lookup).to_csv(save_dir+'/yvar_validation.csv', index=False)
-            yhat.merge(obs_geno_lookup).to_csv(save_dir+'/yhat_validation.csv', index=False)
+            yvar.merge(obs_geno_lookup).to_csv(save_dir+'/val_yvar_validation.csv', index=False)
+            yhat.merge(obs_geno_lookup).to_csv(save_dir+'/val_yhat_validation.csv', index=False)
 
 
 
@@ -723,11 +821,10 @@ match params_run['run_mode']:
 
             # save_dir = '/'.join(params_data['model_path'].split('/')[0:-1])
 
-            yvar.merge(obs_geno_lookup).to_csv(save_dir+'/yvar_training.csv', index=False)
-            yhat.merge(obs_geno_lookup).to_csv(save_dir+'/yhat_training.csv', index=False)
+            yvar.merge(obs_geno_lookup).to_csv(save_dir+'/trn_yvar_training.csv', index=False)
+            yhat.merge(obs_geno_lookup).to_csv(save_dir+'/trn_yhat_training.csv', index=False)
             
             
-        
     case 'eval':
         print('`eval` not implemented!!')
 
