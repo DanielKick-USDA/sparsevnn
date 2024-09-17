@@ -1,12 +1,13 @@
 # import pprint
 # print = pprint.PrettyPrinter(indent=4).pprint
 
-import os, argparse, re, json, hashlib
-
+import os, argparse, re, json, hashlib, pickle # M_list is pickled
 # os.chdir('/home/kickd/Documents/sparsevnn/nbs/demo_maize')
 
 import numpy  as np
 import pandas as pd
+
+import scipy.stats # for spearmanr
 
 import einops
 
@@ -37,6 +38,9 @@ from   lightning.pytorch.loggers import CSVLogger # used to save the history of 
 ## Adaptive Experimentation Platform ====
 from ax.service.ax_client import AxClient, ObjectiveProperties
 
+# write out tables
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 torch.set_float32_matmul_precision('medium')
 
@@ -48,6 +52,7 @@ params_list = sparsevnn.qol.params_list()
 # values in `params_data` and `params_run` are the only ones I expect to be updated
 params_data_keys = set(params_data.keys()).copy()
 params_run_keys  = set(params_run.keys()).copy()
+
 
 # Update Default Parameters ---------------------------------------------------
 # Default < JSON < Arguments
@@ -92,6 +97,7 @@ parser.add_argument("--dataloader_shuffle_valid",type=s2b, help="should this dat
 
 
 # params_run settings
+parser.add_argument("--patch",         type=s2b, help="If true, functions in `vnn_patch.py` will be loaded in.")
 parser.add_argument("--batch_size",    type=int, help="batch size for dataloader")
 parser.add_argument("--max_epoch",     type=int, help="max epoch for training")
 parser.add_argument("--run_mode",      type=str, help="script run to `tune`, `train`, `predict`, or `eval`?")
@@ -683,6 +689,15 @@ def evaluate(parameterization):
     return _
 
 
+# This is a sneaky feature I'm introducing to allow for customization of functions below.
+# Overwrite exiting functions by customizing vnn_patch.py . 
+if params_run['patch'] == True:
+    if 'vnn_patch.py' in os.listdir():
+        from vnn_patch import * 
+        print(f'Patches applied from `vnn_patch.py`.')
+    else:
+        print(f'No patches applied. `vnn_patch.py` not found in {os.getcwd()}')
+        
 
 # Model Execution -------------------------------------------------------------
 json_path = f"{lightning_log_dir}/{exp_name}.json"
@@ -777,7 +792,7 @@ match params_run['run_mode']:
         save_dir = '/'.join(params_data['model_path'].split('/')[0:-1])
         np.savetxt(save_dir+'/y_c.csv', y_c.numpy(), delimiter=",")
         np.savetxt(save_dir+'/y_s.csv', y_s.numpy(), delimiter=",")
-        
+
         if params_data['dataloader_shuffle_valid'] == False:
             yvar = [] # as a sanity check we'll save the true y's. That will allow for 
             yhat = []
