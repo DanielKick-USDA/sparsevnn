@@ -634,7 +634,7 @@ def train_one_model(
     })
     trainer = pl.Trainer(max_epochs=params_run['max_epoch'], logger=logger)
     trainer.fit(model=VNN, train_dataloaders=training_dataloader, val_dataloaders=validation_dataloader)
-    return trainer
+    return M_list, trainer
 
 
 
@@ -677,7 +677,7 @@ def vnn_from_state_dict(
 
 def evaluate(parameterization):
     "This is for Ax's use which is why it pulls variables from the global scope."
-    _ = train_one_model(
+    _M_list, _ = train_one_model(
         params = parameterization,
         edge_dict = cxn_dict,
         inp_tensor_lookup = inp_node_idx_dict,
@@ -714,15 +714,17 @@ if params_run['patch'] == True:
         print(f'Patches applied from `vnn_patch.py`.')
     else:
         print(f'No patches applied. `vnn_patch.py` not found in {os.getcwd()}')
-        
+
 
 # Model Execution -------------------------------------------------------------
-json_path = f"{lightning_log_dir}/{exp_name}.json"
+
 
 match params_run['run_mode']:
     case 'setup':
         print('`setup` complete. Ready to `tune` or `train`.')
     case 'tune':
+        sparsevnn.qol.ensure_dir_path_exists(dir_path = lightning_log_dir)
+        json_path = f"{lightning_log_dir}/{exp_name}.json"
         # overwrite params_list's output with the size with the right output size. Don't allow the user to enter the wrong value. 
         # This means we don't need to worry much about re-using these values. 
         i = [i for i in range(len(params_list)) if params_list[i]['name'] == 'default_out_nodes_out'][0]
@@ -759,6 +761,7 @@ match params_run['run_mode']:
             ax_client.save_to_json_file(filepath = json_path)
 
     case 'train':
+        json_path = f"{lightning_log_dir}/{exp_name}.json"
         params['default_out_nodes_out'] = y.shape[1]
 
         if params_run['train_from_ax']:
@@ -770,7 +773,7 @@ match params_run['run_mode']:
 
         model_log_dir = '/'.join(lightning_log_dir.split('/')[0:-1]+['models'])
         
-        res = train_one_model(
+        res_M_list, res = train_one_model(
             params = params,
             params_data = params_data,
             params_run = params_run,
@@ -779,17 +782,49 @@ match params_run['run_mode']:
             log_dir= model_log_dir
             )
         
+
+        # Turn all the tensors holding shape and index info into ints. This _massively_ reduces the space to save it.
+        def _shrink_M_list(M_list): 
+            # storing col and row info as tensors is convenient but has a massive effect on storage size
+            # If all the size/start/stop values are coerced to ints the size for a test M_list goes from
+            # 5.2G -> 7.5M. At that size we might as well save out al the attributes in it.
+            for i in range(len(M_list)):
+                e = M_list[i].col_info
+                M_list[i].col_info = {k: {
+                    'size':int(e[k]['size']),
+                    'start':int(e[k]['start']),
+                    'stop':int(e[k]['stop']),
+                    } 
+                    for k in e.keys()
+                }
+                
+                e = M_list[i].row_info
+                M_list[i].row_info = {k: {
+                    'size':int(e[k]['size']),
+                    'start':int(e[k]['start']),
+                    'stop':int(e[k]['stop']),
+                    } 
+                    for k in e.keys()
+                }
+            return M_list
+        
+        res_M_list = _shrink_M_list(M_list=res_M_list)
+
+
         if params_run['train_save']:
             # save with the same numbering that pytorch lightning's record used
             log_path = model_log_dir+'/'+exp_name
             fls = os.listdir(log_path)
             nums = [int(e.split('_')[-1]) for e in fls]
-            torch.save(res.model.mod.state_dict(), 
-                       f'{log_path}/version_{max(nums)}/version_{max(nums)}.pt')
-            sparsevnn.qol.write_json(params, 
-                                     f'{log_path}/version_{max(nums)}/version_{max(nums)}.json')
-            # torch.save(res.model.mod, 
-            #            f'{log_path}/version_{max(nums)}/version_{max(nums)}.pt')
+            torch.save(res.model.mod.state_dict(), f'{log_path}/version_{max(nums)}/version_{max(nums)}.pt')
+            sparsevnn.qol.write_json(params,       f'{log_path}/version_{max(nums)}/version_{max(nums)}.json')
+            # sparsevnn.qol.write_json(res_M_list,   f'{log_path}/version_{max(nums)}/version_{max(nums)}_M_list.json')
+
+            with open(f'{log_path}/version_{max(nums)}/version_{max(nums)}_M_list.pkl', 'wb') as f:
+                pickle.dump(res_M_list, f, protocol=5)
+
+
+            # torch.save(res.model.mod,              f'{log_path}/version_{max(nums)}/version_{max(nums)}.pt')
                                 
     case 'predict':
         # need to load params that are specifically associated with the saved model.
