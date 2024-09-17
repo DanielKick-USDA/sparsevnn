@@ -288,7 +288,7 @@ if cache_path == './': # in this case we can't get a meaniful value unless we us
 lightning_log_dir = cache_path+"lightning"
 exp_name = [e for e in cache_path.split('/') if e != ''][-1]
 sparsevnn.qol.ensure_dir_path_exists(dir_path = cache_path)
-sparsevnn.qol.ensure_dir_path_exists(dir_path = lightning_log_dir)
+
 
 # Load Input Data -------------------------------------------------------------
 if use_data_cache_load:
@@ -412,7 +412,24 @@ elif not use_data_cache_load:
 
     cxn = sparsevnn.util.filter_connection_df(cxn = cxn, gene_nodes_gff = gene_nodes_gff)
 
+    # Make sure that the highest node is `yhat` 
+    if not 'yhat' in sparsevnn.util.order_connections(inp = cxn, node_names=None)[0]:
+        print('`yhat` node is not the highest node')
+        # Exists but is in the wrong place
+        if 'yhat' in set(cxn.src.to_list()+cxn.tgt.to_list()):
+            print('`yhat` exists. Removing _ALL_ links to it.')
+            cxn = cxn.loc[~((cxn.src == 'yhat') |
+                            (cxn.src == 'yhat')), ].reset_index(drop=True)
 
+        print('Inserting `yhat`.')
+        top_level_nodes = sparsevnn.util.order_connections(inp = cxn, node_names=None)[0]
+        print('Adding `yhat` node.')
+        cxn = pd.concat([
+            pd.DataFrame([('yhat', e) for e in top_level_nodes], columns=['src', 'tgt']), 
+            cxn]
+            ).reset_index(drop=True)
+
+    # acgt.shape 
     ## Update Genotype Data =======================================================
 
     # Because we use the position in acgt_taxa to map a shared_taxa entry to a position we only 
@@ -432,8 +449,8 @@ elif not use_data_cache_load:
 
 
     # Here is one way of linking snps to genes. Instead of finding snps within a given gene we look for the indices that are closest to or within.  
-
-    acgt, inp_node_idx_dict = sparsevnn.util.acgt_filter_snps(
+    # Now acgt_loci is updated to match acgt's reduced size
+    acgt, inp_node_idx_dict, acgt_loci = sparsevnn.util.acgt_filter_snps(
         acgt = acgt, 
         acgt_loci = acgt_loci, 
         gene_nodes_gff = gene_nodes_gff, 
