@@ -41,6 +41,8 @@ from ax.service.ax_client import AxClient, ObjectiveProperties
 # write out tables
 import pyarrow as pa
 import pyarrow.parquet as pq
+# and plots
+import plotly.express as px
 
 torch.set_float32_matmul_precision('medium')
 
@@ -823,8 +825,19 @@ match params_run['run_mode']:
             with open(f'{log_path}/version_{max(nums)}/version_{max(nums)}_M_list.pkl', 'wb') as f:
                 pickle.dump(res_M_list, f, protocol=5)
 
+            # Get the most recent history
+            history = pd.read_csv(f'{log_path}/version_{max(nums)}/metrics.csv')
+            # pivot longer
+            history = pd.concat([
+                history.drop(columns='val_loss').rename(columns={'train_loss':'loss'}).dropna().assign(split='trn'),
+                history.drop(columns='train_loss').rename(columns={'val_loss':'loss'}).dropna().assign(split='val')]
+            )
 
-            # torch.save(res.model.mod,              f'{log_path}/version_{max(nums)}/version_{max(nums)}.pt')
+            plt = px.line(history, x = 'step', y = 'loss', color='split')
+
+            plt.write_html(f'{log_path}/version_{max(nums)}/metrics.html')
+            plt.write_image(f'{log_path}/version_{max(nums)}/metrics.svg')
+
                                 
     case 'predict':
         # need to load params that are specifically associated with the saved model.
@@ -864,8 +877,8 @@ match params_run['run_mode']:
 
             # save_dir = '/'.join(params_data['model_path'].split('/')[0:-1])
 
-            yvar.merge(obs_geno_lookup).to_csv(save_dir+'/val_yvar_validation.csv', index=False)
-            yhat.merge(obs_geno_lookup).to_csv(save_dir+'/val_yhat_validation.csv', index=False)
+            pq.write_table(pa.Table.from_pandas(yvar.merge(obs_geno_lookup)), save_dir+'val_yvar_training.parquet')
+            pq.write_table(pa.Table.from_pandas(yhat.merge(obs_geno_lookup)), save_dir+'val_yhat_training.parquet')
 
 
 
@@ -888,9 +901,8 @@ match params_run['run_mode']:
 
             # save_dir = '/'.join(params_data['model_path'].split('/')[0:-1])
 
-            yvar.merge(obs_geno_lookup).to_csv(save_dir+'/trn_yvar_training.csv', index=False)
-            yhat.merge(obs_geno_lookup).to_csv(save_dir+'/trn_yhat_training.csv', index=False)
-            
+            pq.write_table(pa.Table.from_pandas(yvar.merge(obs_geno_lookup)), save_dir+'trn_yvar_training.parquet')
+            pq.write_table(pa.Table.from_pandas(yhat.merge(obs_geno_lookup)), save_dir+'trn_yhat_training.parquet')     
             
     case 'eval':
         print('`eval` not implemented!!')
