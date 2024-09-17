@@ -906,6 +906,375 @@ match params_run['run_mode']:
             
     case 'eval':
         print('`eval` not implemented!!')
+        model = vnn_from_state_dict(
+            state_dict_path = params_data['model_path'],
+            # Here we read in the associated json in case the model specification is different
+            # from the current params file.
+            params = sparsevnn.qol.read_json('.'.join(params_data['model_path'].split('.')[0:-1]+['json'])),
+            # params = params,
+            params_data = params_data,
+            edge_dict = cxn_dict,
+            inp_tensor_lookup = inp_node_idx_dict,
+            ) 
+
+        save_dir = '/'.join(params_data['model_path'].split('/')[0:-1])
+
+        # load in cached M_list for model        
+        with open(params_data['model_path'].replace('.pt', '_M_list.pkl'), 'rb') as f:
+            M_list = pickle.load(f, protocol=5)
+
+
+        if 'saliency_inp' in params_run['eval_list']:
+            #TODO is M_list loaded?
+            
+            model = model.eval()
+
+            # iterate over dataloader and aggregate all of the saliences for the input data
+            def _collect_salience_snpwise(model, inp_dl):
+                
+                # get saliency for all obs given model, dataloader
+                def _get_saliency(y_i, x_i, model):
+                    # y_i, x_i = (y_i.to('cpu'), x_i.to('cpu'))
+                    x_i.requires_grad_()
+                    model.eval()
+
+                    optimizer = torch.optim.Adam(model.parameters(), lr = 0.01)
+                    loss_fn = nn.MSELoss()
+
+                    loss = loss_fn(model(x_i), y_i)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    out = x_i.grad
+                    return out
+
+
+                out = []
+                for i, (y,x) in enumerate(inp_dl):
+                    out.append(_get_saliency(y_i = y, x_i = x, model = model))
+                out = torch.concat(out)
+
+                #reverse workup for acgt_tensor to get (obs, nuc, len)
+                out = out.reshape(out.shape[0], -1, params_data['num_nucleotides']).swapaxes(1,2)
+                return out
+
+
+            training_inp_sals   = _collect_salience_snpwise(model = model, inp_dl = training_dataloader)
+            validation_inp_sals = _collect_salience_snpwise(model = model, inp_dl = validation_dataloader)
+
+            ### SNP-wise Manhattan
+            def _plt_saliences(salience, save_dir,  plt_prefix):
+                print('\n'.join(['Percentiles:']+[f'q {i} = {np.quantile(salience.salience, q = i) :f}' for i in [.95, .99, .999]]))
+                # salience distribution
+                plt_d = px.histogram(salience, x = 'salience')
+
+                plt_d.add_vline(x=np.quantile(salience.salience, q = .95), line_dash="solid", line_color="#5d5d5d")
+                plt_d.add_vline(x=np.quantile(salience.salience, q = .99), line_dash="dash",  line_color="#2a2a2a")
+                plt_d.add_vline(x=np.quantile(salience.salience, q = .999),line_dash="dot",   line_color="#000000")
+
+                plt_d.write_html(save_dir+f"{plt_prefix}_dist.html")
+                plt_d.write_image(save_dir+f"{plt_prefix}_dist.svg")
+
+
+                # salience manhattan
+                plt_m = px.scatter(salience, x = 'index', y = 'salience', color = 'chrom', hover_data=['pos', 'name'])
+
+                plt_m.add_hline(y=np.quantile(salience.salience, q = .95), line_dash="solid", line_color="#5d5d5d")
+                plt_m.add_hline(y=np.quantile(salience.salience, q = .99), line_dash="dash",  line_color="#2a2a2a")
+                plt_m.add_hline(y=np.quantile(salience.salience, q = .999),line_dash="dot",   line_color="#000000")
+
+                plt_m.write_html(save_dir+f"{plt_prefix}_manhattan.html")
+                plt_m.write_image(save_dir+f"{plt_prefix}_manhattan.svg")
+
+                return plt_m, plt_d
+            
+            # Training
+            e = validation_inp_sals
+            salience = acgt_loci.copy()
+            salience['salience'] = e.numpy(
+                ).max(axis = 1 # max over nucleotide axis
+                ).max(axis = 0 # max over observation axis
+                )
+            salience = salience.reset_index()
+
+            salience['chrom'] = salience['chrom'].astype(str)  
+
+            pq.write_table(pa.Table.from_pandas(salience), save_dir+'trn_salience_snpwise.parquet')
+            _plt_saliences(salience = salience, save_dir = save_dir, plt_prefix = 'trn_salience_snpwise')  
+
+            # Validation
+            e = validation_inp_sals
+            salience = acgt_loci.copy()
+            salience['salience'] = e.numpy(
+                ).max(axis = 1 # max over nucleotide axis
+                ).max(axis = 0 # max over observation axis
+                )
+            salience = salience.reset_index()
+
+            salience['chrom'] = salience['chrom'].astype(str)  
+
+            pq.write_table(pa.Table.from_pandas(salience), save_dir+'val_salience_snpwise.parquet')
+            _plt_saliences(salience = salience, save_dir = save_dir, plt_prefix = 'val_salience_snpwise')  
+
+
+            # NOTE this could also be broken up into snpwise and genewise options
+            ### Gene-wise Manhattan
+            def _collapse_salience_genewise(M_list, acgt_loci, sals):
+                # I can get the gene associations back like this. Not the same as a manhattan
+                _ = pd.DataFrame([(
+                        e, 
+                        int(M_list[0].row_info[e]['start']),
+                        int(M_list[0].row_info[e]['stop'])
+                    ) for e in M_list[0].row_info.keys()], 
+                    columns=['name', 'start', 'stop']
+                    ).sort_values('start'
+                    ).reset_index(drop = True)
+
+                _['start'] = (_['start'] / params_data['num_nucleotides']).astype(int) # M_list is in reference to the flattened data.
+                _['stop']  = (_['stop']  / params_data['num_nucleotides']).astype(int)
+
+                _['chrom'] = 0
+                _['pos'] = 0
+                _['max_sal'] = 0.0
+
+                for i in _.index:
+                    start, stop = _.loc[i, ['start', 'stop']]
+                    _.loc[i, ['salience']] = float( sals[:, :, start:stop].max().item() )
+                    _.loc[i, ['chrom', 'pos']]  = acgt_loci.loc[round(np.mean([start, stop])), ['chrom','pos']]
+
+                _['chrom'] = _['chrom'].astype(str) 
+                _['pos'] = _['pos'].astype(str) 
+                salience = _.reset_index()
+
+                return salience
+
+
+            training_inp_sals   = _collapse_salience_genewise(M_list = M_list, acgt_loci = acgt_loci, sals = training_inp_sals)
+            validation_inp_sals = _collapse_salience_genewise(M_list = M_list, acgt_loci = acgt_loci, sals = validation_inp_sals)
+
+            _ = _plt_saliences(salience=training_inp_sals,   save_dir = save_dir, plt_prefix = 'trn_salience_genewise')
+            _ = _plt_saliences(salience=validation_inp_sals, save_dir = save_dir, plt_prefix = 'val_salience_genewise')
+
+            pq.write_table(pa.Table.from_pandas(training_inp_sals), save_dir+"trn_salience_snpwise.parquet")
+            pq.write_table(pa.Table.from_pandas(validation_inp_sals), save_dir+"val_salience_snpwise.parquet")
+
+
+        if 'saliency_wab' in params_run['eval_list']:
+            # break this into two problems: 
+            #   1. Collecting Gradients
+            #   2. Organizing Gradients
+
+
+            # Training a model with the same hyperparameters sometimes results in gradients that are max 0 and sometimes not. 
+            # This seems to be a gradient attenuation problem. On one run I got max(abs(grads)) that look like so:
+            # trn 0 -> 0 -> 0 -> 0 -> 0 -> 0 -> 0 -> 0.000 -> 0.001 -> 0.001
+            # tst 0 -> 0 -> 0 -> 0 -> 0 -> 0 -> 0 -> 0.010 -> 0.031 -> 0.017
+            # Observed with gmx data and params: 
+            # "{'default_decay_rate': 0, 'default_drop_nodes_edge': 0.0, 'default_drop_nodes_inp': 0.0, 'default_drop_nodes_out': 0.0, 'default_out_nodes_edge': 2, 
+            #   'default_out_nodes_inp': 1, 'default_out_nodes_out': 2, 'default_reps_nodes_edge': 2, 'default_reps_nodes_inp': 1, 'default_reps_nodes_out': 1}"
+            def collect_gradients(model, inp_dl = training_dataloader):
+                "Returns a tuple of weight grads, bias grads"
+                # Setup list of lists [layer, ..., layer] with batch in layer
+                gradient_weight_holder = [[] for i in model.layer_list]
+                gradient_bias_holder = [[] for i in model.layer_list]
+                gradient_obs = []
+
+                for i, (y_i, x_i) in enumerate(inp_dl):
+                    gradient_obs.append(len(y_i))
+                    # set to train mode, setup optimizer
+                    model = model.train()
+
+                    optimizer = torch.optim.Adam(model.parameters(), lr = 0.01)
+                    loss_fn = nn.MSELoss()
+
+                    loss = loss_fn(model(x_i), y_i)
+                    optimizer.zero_grad()
+                    loss.backward()
+
+                    # now go through each of the layers and pull the gradient. 
+                    # Convert to numpy and save
+                    for level in range(len(model.layer_list)):
+                        gradient_weight_holder[level].append( model.layer_list[level].weights.grad.detach().cpu().numpy() )
+                        gradient_bias_holder[level].append( model.layer_list[level].bias.grad.detach().cpu().numpy() )
+
+                    # print((i, len(gradient_obs), len(gradient_holder[-1])))
+                    # break
+
+                gradient_obs = np.array(gradient_obs)
+                # convert to percent of training set
+                gradient_obs = gradient_obs/gradient_obs.sum()
+                gradient_obs = gradient_obs[:, None]
+
+
+                def _scale_gradients(gradient_list, gradient_obs): # gradient list should be gradient_holder[-1]
+                    _ = np.concatenate(gradient_list, 0).reshape(gradient_obs.shape[0], -1)
+                    _ = _ * gradient_obs # Weight by the number of obs that went into the gradient
+                    _ = _.sum(axis = 0)  # Get average gradient
+                    return _
+
+                # turn batches of gradients in gradient_holder into average (accumulated) gradient
+                gradient_weight_holder = [_scale_gradients(gradient_list = e, gradient_obs = gradient_obs) for e in gradient_weight_holder]
+                gradient_bias_holder = [_scale_gradients(gradient_list = e, gradient_obs = gradient_obs) for e in gradient_bias_holder]
+                
+                return gradient_weight_holder, gradient_bias_holder
+
+            training_weight_grads   = collect_gradients(model = model, inp_dl = training_dataloader)
+            validation_weight_grads = collect_gradients(model = model, inp_dl = validation_dataloader)
+
+
+            coordinates = [e.connectivity for e in model.layer_list]
+            # rearrange into records of (layer, key, start, stop)
+            col_info = [[
+                (layer, 
+                k, 
+                int(M_list[layer].col_info[k]['start']), 
+                int(M_list[layer].col_info[k]['stop']) )
+                for k in M_list[layer].col_info.keys() 
+                ] for layer in 
+                [layer for layer in range(len(M_list))]]
+
+            # get rid of nested lists
+            col_info = sum(col_info, [])
+
+            _ = pd.DataFrame(col_info, columns=['layer', 'k', 'start', 'stop'])
+
+            df_weight = []
+            df_bias = []
+
+            for i in _.index:
+                # print(i)
+                layer, k, start, stop = _.loc[i, ].values
+                # the first two [0] are to get the first index of the (2, #) coordinate tensor
+                matching_idx = torch.where(((coordinates[layer][0] >= start) & (coordinates[layer][0] <  stop)))
+                df_weight.append(pd.DataFrame(
+                    {
+                    'layer':layer, 
+                    'k':k, 
+                    'start':start, 
+                    'stop':stop,
+                    'tensor_idx': matching_idx[0],
+                    'trn_weight_grads': training_weight_grads[0][layer][matching_idx[0]], # weights
+                    # 'trn_bias_grads': training_weight_grads[1][layer][matching_idx[0]], # bias
+                    'val_weight_grads': validation_weight_grads[0][layer][matching_idx[0]], # weights
+                    # 'val_bias_grads': validation_weight_grads[1][layer][matching_idx[0]] # bias
+                    }
+                    ))
+                
+                # NOTE That because weights are spread across 2 dims we have to use a lookup to turn the 1d representation into 2. 
+                # Bias doesn't have that problem so we can directly index them.
+                df_bias.append(pd.DataFrame(
+                    {
+                    'layer':layer, 
+                    'k':k, 
+                    'start':start, 
+                    'stop':stop,
+                    'tensor_idx': [j for j in range(start, stop)],
+                    'trn_bias_grads': training_weight_grads[1][layer][start:stop], # bias
+                    'val_bias_grads': validation_weight_grads[1][layer][start:stop] # bias
+                    }
+                    ))
+                
+            df_weight = pd.concat(df_weight)
+            df_bias   = pd.concat(df_bias)
+
+            pq.write_table(pa.Table.from_pandas(df_weight), save_dir+'gradients_nodewise_weights.parquet')
+            pq.write_table(pa.Table.from_pandas(df_bias),   save_dir+'gradients_nodewise_bias.parquet')
+
+
+        if 'rho_out' in params_run['eval_list']:
+            # NOTE: this can take a long time.
+            def _collect_rho(model, M_list, inp_dl):
+
+                # Convert M_list into a usable lookup
+                out = []
+                for i in range(len(M_list)):
+                    # break down a `structured_layer_info` class into a df
+                    slinfo = M_list[i]
+                    _ = [(k, int(slinfo.col_info[k]['start']), int(slinfo.col_info[k]['stop'])) for k in slinfo.col_info.keys()]
+                    _ = pd.DataFrame(_, columns=['node', 'start', 'stop'])
+                    _['layer'] = i
+                    out.append(_)
+                out = pd.concat(out)
+
+                out = out.reset_index(drop=True).reset_index().rename(columns={'index':'node_forward_idx'})
+
+
+                # table with rows being (nodes x outputs per node) and cols being (obs) 
+                output_tracker = pd.DataFrame(
+                    {'node_forward_idx' : sum(
+                        [[k for i in range(n)] 
+                            for k,n in zip(
+                                out['node_forward_idx'].tolist(),
+                                (out['stop'] - out['start']).tolist())
+                                ], 
+                                [])}
+                )
+
+
+                y_actual = [] # Track the actual y and the...
+                node_out = [] # outputs of each node
+
+
+                for i, (y,x) in enumerate(inp_dl):
+                    # This is the .forward() method adapted to store all the interediate tensors
+                    with torch.no_grad():
+                        tensor_out = [x]
+                        for l in model.layer_list:
+                            tensor_out.append(l(tensor_out[-1]))
+                            
+                    # print(model(x_i)[0:5], tensor_out[-1][0:5]) # This shows that ther are the same 
+
+                    # Organize the intermediate outputs into a long structured matrix
+                    _ = []
+                    for node in out.node_forward_idx:
+                        mask = (out.node_forward_idx == node)
+                        start = out.loc[mask, 'start'].values[0].astype(int)
+                        stop  = out.loc[mask, 'stop' ].values[0].astype(int)
+                        layer = out.loc[mask, 'layer'].values[0].astype(int)
+
+                        _.append(tensor_out[layer][:, start:stop])
+
+                    # these are all in the shape (obs, vals) so we need to concat and transpose to match output_tracker
+                    tmp = torch.concat(_, dim=1).swapaxes(0,1).numpy()
+
+                    y_actual.append( y.swapaxes(0,1).numpy() )
+                    node_out.append( tmp )
+
+
+                y_actual = np.concatenate(y_actual, axis = 1) # dim (y var,  obs )
+                node_out = np.concatenate(node_out, axis = 1) # dim (nodes x val per node,  obs )
+
+
+                # Collapse to summary statistics
+                rho_val = np.zeros((y_actual.shape[0], node_out.shape[0]))
+                rho_sig = np.zeros_like(rho_val)
+
+                for y_i in range(rho_val.shape[0]):
+                    for n_i in range(rho_val.shape[1]):
+                        if ((y_actual[y_i, :].std() == 0.0) | 
+                            (node_out[n_i, :].std() == 0.0)):
+                            val, sig = np.nan, np.nan
+                        
+                        else:
+                            val, sig = scipy.stats.spearmanr( y_actual[y_i, :], node_out[n_i, :] )
+                        
+                        rho_val[y_i, n_i] = val
+                        rho_sig[y_i, n_i] = sig
+
+
+                output_tracker = pd.concat([
+                    output_tracker, 
+                    pd.DataFrame(rho_val.swapaxes(0,1), columns=y_names),
+                    pd.DataFrame(rho_sig.swapaxes(0,1), columns=[e+'_sig' for e in y_names])    
+                    ], axis=1)
+
+                return output_tracker
+
+
+            trn_rho = _collect_rho(model = model, M_list = M_list, inp_dl = training_dataloader)
+            val_rho = _collect_rho(model = model, M_list = M_list, inp_dl = validation_dataloader)
+
+            pq.write_table(pa.Table.from_pandas(trn_rho), save_dir+'trn_rho_nodewise.parquet')
+            pq.write_table(pa.Table.from_pandas(val_rho), save_dir+'trn_rho_nodewise.parquet')
 
 
     case _:
