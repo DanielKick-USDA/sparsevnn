@@ -108,10 +108,25 @@ parser.add_argument("--tune_max",      type=int, help="if `tune` what is the max
 parser.add_argument("--tune_force",    type=s2b, help="if `tune` should trials be run even if there are `tune_max` already?")
 parser.add_argument("--train_from_ax", type=s2b, help="if `train` should the best params from an Ax be used??")
 parser.add_argument("--train_save",    type=s2b, help="if `train` should the model be saved?")
+parser.add_argument("--eval",          type=str, nargs='*', action='append', help="")
+# --eval can be passed multiple times to create a list of 0 or more evaluations to be run. 
+# per https://stackoverflow.com/questions/15753701/how-can-i-pass-a-list-as-a-command-line-argument-with-argparse
+# at the time of writing, valid options are `saliency_inp`, `saliency_wab`, `rho_out`
 
 args = parser.parse_args()
 
+# If  --eval a b        -> [[a, b]]
+#     --eval a --eval b -> [[a], [b]]
+# so as_lat ensures that instead we have a flat list as `eval`
+def as_lat(inp):
+    lat = lambda x: True if list not in [type(e) for e in x] else False
+    while lat(inp) != True:
+        # turn everything that isn't a list into one, then use sum to concat the lists
+        inp = sum([[e] if type(e) != list else e for e in inp], [])
+    return inp
 
+if args.eval != None:
+    args.eval = as_lat(args.eval)
 
 ## JSON parameter files =======================================================
 # in place update all k/v if an external file was passed.
@@ -905,7 +920,6 @@ match params_run['run_mode']:
             pq.write_table(pa.Table.from_pandas(yhat.merge(obs_geno_lookup)), save_dir+'trn_yhat_training.parquet')     
             
     case 'eval':
-        print('`eval` not implemented!!')
         model = vnn_from_state_dict(
             state_dict_path = params_data['model_path'],
             # Here we read in the associated json in case the model specification is different
@@ -921,12 +935,10 @@ match params_run['run_mode']:
 
         # load in cached M_list for model        
         with open(params_data['model_path'].replace('.pt', '_M_list.pkl'), 'rb') as f:
-            M_list = pickle.load(f, protocol=5)
+            M_list = pickle.load(f)
 
 
-        if 'saliency_inp' in params_run['eval_list']:
-            #TODO is M_list loaded?
-            
+        if 'saliency_inp' in params_run['eval']:            
             model = model.eval()
 
             # iterate over dataloader and aggregate all of the saliences for the input data
@@ -1058,7 +1070,7 @@ match params_run['run_mode']:
             pq.write_table(pa.Table.from_pandas(validation_inp_sals), save_dir+"val_salience_snpwise.parquet")
 
 
-        if 'saliency_wab' in params_run['eval_list']:
+        if 'saliency_wab' in params_run['eval']:
             # break this into two problems: 
             #   1. Collecting Gradients
             #   2. Organizing Gradients
@@ -1180,7 +1192,7 @@ match params_run['run_mode']:
             pq.write_table(pa.Table.from_pandas(df_bias),   save_dir+'gradients_nodewise_bias.parquet')
 
 
-        if 'rho_out' in params_run['eval_list']:
+        if 'rho_out' in params_run['eval']:
             # NOTE: this can take a long time.
             def _collect_rho(model, M_list, inp_dl):
 
