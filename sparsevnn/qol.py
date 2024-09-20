@@ -39,7 +39,7 @@ def read_json(json_path
 def write_json(obj, json_path):
     import json
     with open(json_path, 'w') as f:
-        f.write(json.dumps(obj, indent=4))
+        f.write(json.dumps(obj, indent=4, sort_keys=True))
 
 # %% ../nbs/01_qol.ipynb 9
 def ensure_dir_path_exists(dir_path = '../ext_data' # Directory path to check
@@ -134,6 +134,9 @@ def params_data(): return {
     'species': None,
     'num_nucleotides': 4,
 
+    ## Cache intermediate
+    # 'use_data_cache': True, 
+
     ## paths
     'graph_cache_path': './', # kegg_cache_path
     'gff_path': None,
@@ -143,8 +146,9 @@ def params_data(): return {
     'model_path': None,
 
     ## Graph
-    'graph_source': 'kegg',
+    'graph_source': 'kegg', # kegg, cxn
     'kegg_catalog': '00001',
+    'graph_cxn'   :  None, 
     ##
     'holdout_type': 'percent', # percent, taxa, parent
     'holdout_percent': 0.2,
@@ -157,6 +161,8 @@ def params_data(): return {
 
 # %% ../nbs/01_qol.ipynb 15
 def params_run(): return {
+    'patch'     : False, # Should code be patched using the code in vnn_patch.py?
+    
     'batch_size': 32,
     'max_epoch' : 2,
     'run_mode'  : 'setup', # modes: tune, train, predict, eval
@@ -167,9 +173,10 @@ def params_run(): return {
 
     ## train ====
     'train_from_ax' : False, # should we use the best ax trial or a user specified network?
-    'train_save': True
+    'train_save': True,
     ## predict ====
     ## eval ====
+    'eval': [],
 }
 
 # %% ../nbs/01_qol.ipynb 16

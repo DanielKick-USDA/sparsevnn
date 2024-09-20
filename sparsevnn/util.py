@@ -718,8 +718,9 @@ def acgt_filter_snps(acgt,
 
     inp_node_idx_dict = out.copy()
 
-        
-    return (acgt, inp_node_idx_dict)
+    # return a df of the position info for manhattan plots
+    acgt_loci = acgt_loci.loc[used_snps, ['chrom', 'pos']].reset_index(drop=True).copy()
+    return (acgt, inp_node_idx_dict, acgt_loci)
 
 # %% ../nbs/02_GraphDataUtils.ipynb 42
 def filter_connection_df(cxn, gene_nodes_gff):
@@ -818,7 +819,7 @@ def mk_vnnhelper(
 
     # overwrite node outputs with a size inversely proportional to distance from prediction node
     for query in list(dist.keys()):
-        myvnn.node_props[query]['out'] = sparsevnn.core._dist_scale_function(
+        myvnn.node_props[query]['out'] = sparsevnn.core.dist_scale_function(
             out = myvnn.node_props[query]['out'],
             dist = dist[query],
             decay_rate = params['default_decay_rate'])
