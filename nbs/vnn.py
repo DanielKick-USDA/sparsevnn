@@ -740,6 +740,7 @@ match params_run['run_mode']:
     case 'setup':
         print('`setup` complete. Ready to `tune` or `train`.')
     case 'tune':
+        print('Running Hyperparameter Tuning')
         sparsevnn.qol.ensure_dir_path_exists(dir_path = lightning_log_dir)
         json_path = f"{lightning_log_dir}/{exp_name}.json"
         # overwrite params_list's output with the size with the right output size. Don't allow the user to enter the wrong value. 
@@ -778,6 +779,7 @@ match params_run['run_mode']:
             ax_client.save_to_json_file(filepath = json_path)
 
     case 'train':
+        print('Running Training')
         json_path = f"{lightning_log_dir}/{exp_name}.json"
         params['default_out_nodes_out'] = y.shape[1]
 
@@ -855,9 +857,11 @@ match params_run['run_mode']:
 
                                 
     case 'predict':
+        print('Running Prediction')
+
         # need to load params that are specifically associated with the saved model.
         # otherwise there's a chance the hyperparameters will have changed.
-        res = vnn_from_state_dict(
+        model = vnn_from_state_dict(
             state_dict_path = params_data['model_path'],
             # Here we read in the associated json in case the model specification is different
             # from the current params file.
@@ -867,59 +871,89 @@ match params_run['run_mode']:
             edge_dict = cxn_dict,
             inp_tensor_lookup = inp_node_idx_dict,
             ) 
-        res = res.eval()
+        model = model.eval()
 
         save_dir = '/'.join(params_data['model_path'].split('/')[0:-1])
-        np.savetxt(save_dir+'/y_c.csv', y_c.numpy(), delimiter=",")
-        np.savetxt(save_dir+'/y_s.csv', y_s.numpy(), delimiter=",")
 
-        if params_data['dataloader_shuffle_valid'] == False:
-            yvar = [] # as a sanity check we'll save the true y's. That will allow for 
-            yhat = []
+        pq.write_table(pa.Table.from_pandas(pd.DataFrame(y_c.numpy()[:,None].T, columns=y_names)), save_dir+f'/{params_data_subset_hash}_yvar_cs_center.parquet')
+        pq.write_table(pa.Table.from_pandas(pd.DataFrame(y_s.numpy()[:,None].T, columns=y_names)), save_dir+f'/{params_data_subset_hash}_yvar_cs_scale.parquet')
 
+        def _collect_predictions(model, inp_dl):
+            # as a sanity check we'll save the true y's. That will allow for 
+            yvar, yhat = [], []
             # only get the validation dataloader if the training dataloader is shuffled.
-            for i, (y,x) in enumerate(validation_dataloader):
-                yvar.append(      y.detach().cpu() )
-                yhat.append( res(x).detach().cpu() )
+            for i, (y,x) in enumerate(inp_dl):
+                yvar.append(       y.detach().cpu() )
+                yhat.append(model(x).detach().cpu() )
 
-            yvar = pd.DataFrame(torch.concat(yvar).numpy(), columns=y_names)
-            yvar['Phno_Idx'] = test_idx
-            yvar['Split'] = 'Validation'
+            yvar = torch.concat(yvar)
+            yhat = torch.concat(yhat)
+            return yvar, yhat
 
-            yhat = pd.DataFrame(torch.concat(yhat).numpy(), columns=y_names)
-            yhat['Phno_Idx'] = test_idx
-            yhat['Split'] = 'Validation'
-
-            # save_dir = '/'.join(params_data['model_path'].split('/')[0:-1])
-
-            pq.write_table(pa.Table.from_pandas(yvar.merge(obs_geno_lookup)), save_dir+'val_yvar_training.parquet')
-            pq.write_table(pa.Table.from_pandas(yhat.merge(obs_geno_lookup)), save_dir+'val_yhat_training.parquet')
-
-
+        # mk df to apply taxa to predictions
+        _ = phno.loc[:, ['Taxa']].reset_index(names='Is_Phno').merge(obs_geno_lookup).loc[:, ['Taxa', 'Phno_Idx']]
 
         if params_data['dataloader_shuffle_train'] == False:
-            yvar = [] # as a sanity check we'll save the true y's. That will allow for 
-            yhat = []
+            yvar, yhat = _collect_predictions(model = model, inp_dl  = training_dataloader)
 
-            # only get the validation dataloader if the training dataloader is shuffled.
-            for i, (y,x) in enumerate(training_dataloader):
-                yvar.append(      y.detach().cpu() )
-                yhat.append( res(x).detach().cpu() )
+            yvcs = pd.DataFrame(yvar.numpy(),            columns=y_names).assign(Split = 'Training', Phno_Idx = train_idx).merge(_)
+            yhcs = pd.DataFrame(yhat.numpy(),            columns=y_names).assign(Split = 'Training', Phno_Idx = train_idx).merge(_)
+            yvr = pd.DataFrame((yvar*y_s + y_c).numpy(), columns=y_names).assign(Split = 'Training', Phno_Idx = train_idx).merge(_)
+            yhr = pd.DataFrame((yhat*y_s + y_c).numpy(), columns=y_names).assign(Split = 'Training', Phno_Idx = train_idx).merge(_)
 
-            yvar = pd.DataFrame(torch.concat(yvar).numpy(), columns=y_names)
-            yvar['Phno_Idx'] = train_idx
-            yvar['Split'] = 'Training'
+            save_pq = lambda df, nom: pq.write_table(pa.Table.from_pandas(df), nom)
+            save_pq(yvcs, save_dir+f'/{params_data_subset_hash}_yvar_cs_trn.parquet')
+            save_pq(yhcs, save_dir+f'/{params_data_subset_hash}_yhat_cs_trn.parquet')
+            save_pq(yhcs, save_dir+f'/{params_data_subset_hash}_yvar_trn.parquet')
+            save_pq(yhr,  save_dir+f'/{params_data_subset_hash}_yhat_trn.parquet')
 
-            yhat = pd.DataFrame(torch.concat(yhat).numpy(), columns=y_names)
-            yhat['Phno_Idx'] = train_idx
-            yhat['Split'] = 'Training'
+            for e in y_names:
+                plt = px.scatter(pd.concat([yvcs.loc[:, [e, 'Taxa']].rename(columns={e:'Observed'}),
+                                            yhcs.loc[:, [e]].rename(columns={e:'Predicted'})], axis = 1),
+                                            x = 'Observed', y = 'Predicted', color = 'Taxa', hover_data=['Taxa'], title=e )
+                
+                plt.write_html(save_dir+f'/{params_data_subset_hash}_eval_cs_scatter_trn.html')
+                plt.write_image(save_dir+f'/{params_data_subset_hash}_eval_cs_scatter_trn.svg')
 
-            # save_dir = '/'.join(params_data['model_path'].split('/')[0:-1])
+                plt = px.scatter(pd.concat([yvr.loc[:, [e, 'Taxa']].rename(columns={e:'Observed'}),
+                                            yhr.loc[:, [e]].rename(columns={e:'Predicted'})], axis = 1),
+                                            x = 'Observed', y = 'Predicted', color = 'Taxa', hover_data=['Taxa'], title=e )
+                
+                plt.write_html(save_dir+f'/{params_data_subset_hash}_eval_scatter_trn.html')
+                plt.write_image(save_dir+f'/{params_data_subset_hash}_eval_scatter_trn.svg')
 
-            pq.write_table(pa.Table.from_pandas(yvar.merge(obs_geno_lookup)), save_dir+'trn_yvar_training.parquet')
-            pq.write_table(pa.Table.from_pandas(yhat.merge(obs_geno_lookup)), save_dir+'trn_yhat_training.parquet')     
+
+        if params_data['dataloader_shuffle_valid'] == False:
+            yvar, yhat = _collect_predictions(model = model, inp_dl  = validation_dataloader)
+
+            yvcs = pd.DataFrame(yvar.numpy(),            columns=y_names).assign(Split = 'Validation', Phno_Idx = test_idx).merge(_)
+            yhcs = pd.DataFrame(yhat.numpy(),            columns=y_names).assign(Split = 'Validation', Phno_Idx = test_idx).merge(_)
+            yvr = pd.DataFrame((yvar*y_s + y_c).numpy(), columns=y_names).assign(Split = 'Validation', Phno_Idx = test_idx).merge(_)
+            yhr = pd.DataFrame((yhat*y_s + y_c).numpy(), columns=y_names).assign(Split = 'Validation', Phno_Idx = test_idx).merge(_)
+
+            save_pq = lambda df, nom: pq.write_table(pa.Table.from_pandas(df), nom)
+            save_pq(yvcs, save_dir+f'/{params_data_subset_hash}_yvar_cs_val.parquet')
+            save_pq(yhcs, save_dir+f'/{params_data_subset_hash}_yhat_cs_val.parquet')
+            save_pq(yhcs, save_dir+f'/{params_data_subset_hash}_yvar_val.parquet')
+            save_pq(yhr,  save_dir+f'/{params_data_subset_hash}_yhat_val.parquet')
+
+            for e in y_names:
+                plt = px.scatter(pd.concat([yvcs.loc[:, [e, 'Taxa']].rename(columns={e:'Observed'}),
+                                            yhcs.loc[:, [e]].rename(columns={e:'Predicted'})], axis = 1),
+                                            x = 'Observed', y = 'Predicted', color = 'Taxa', hover_data=['Taxa'], title=e )
+                
+                plt.write_html(save_dir+f'/{params_data_subset_hash}_eval_cs_scatter_val.html')
+                plt.write_image(save_dir+f'/{params_data_subset_hash}_eval_cs_scatter_val.svg')
+
+                plt = px.scatter(pd.concat([yvr.loc[:, [e, 'Taxa']].rename(columns={e:'Observed'}),
+                                            yhr.loc[:, [e]].rename(columns={e:'Predicted'})], axis = 1),
+                                            x = 'Observed', y = 'Predicted', color = 'Taxa', hover_data=['Taxa'], title=e )
+                
+                plt.write_html(save_dir+f'/{params_data_subset_hash}_eval_scatter_val.html')
+                plt.write_image(save_dir+f'/{params_data_subset_hash}_eval_scatter_val.svg')            
             
     case 'eval':
+        print('Running Evaluation')
         model = vnn_from_state_dict(
             state_dict_path = params_data['model_path'],
             # Here we read in the associated json in case the model specification is different
@@ -938,7 +972,9 @@ match params_run['run_mode']:
             M_list = pickle.load(f)
 
 
-        if 'saliency_inp' in params_run['eval']:            
+        if 'saliency_inp' in params_run['eval']:     
+            print('Calculating salience w.r.t. input (snp-wise)')
+
             model = model.eval()
 
             # iterate over dataloader and aggregate all of the saliences for the input data
@@ -969,13 +1005,16 @@ match params_run['run_mode']:
                 out = out.reshape(out.shape[0], -1, params_data['num_nucleotides']).swapaxes(1,2)
                 return out
 
+            if params_data['dataloader_shuffle_train'] == False:
+                training_inp_sals   = _collect_salience_snpwise(model = model, inp_dl = training_dataloader)
 
-            training_inp_sals   = _collect_salience_snpwise(model = model, inp_dl = training_dataloader)
-            validation_inp_sals = _collect_salience_snpwise(model = model, inp_dl = validation_dataloader)
+            if params_data['dataloader_shuffle_valid'] == False:
+                validation_inp_sals = _collect_salience_snpwise(model = model, inp_dl = validation_dataloader)
 
-            ### SNP-wise Manhattan
+            ### SNP-wise Manhattan #FIXME there's a defect in _plt_saliences
             def _plt_saliences(salience, save_dir,  plt_prefix):
-                print('\n'.join(['Percentiles:']+[f'q {i} = {np.quantile(salience.salience, q = i) :f}' for i in [.95, .99, .999]]))
+                print('\n'.join(['Percentiles:']+[f'q {i} = {np.quantile(salience.salience, q = i)}' for i in [.95, .99, .999]]))
+                
                 # salience distribution
                 plt_d = px.histogram(salience, x = 'salience')
 
@@ -986,9 +1025,8 @@ match params_run['run_mode']:
                 plt_d.write_html(save_dir+f"{plt_prefix}_dist.html")
                 plt_d.write_image(save_dir+f"{plt_prefix}_dist.svg")
 
-
                 # salience manhattan
-                plt_m = px.scatter(salience, x = 'index', y = 'salience', color = 'chrom', hover_data=['pos', 'name'])
+                plt_m = px.scatter(salience, x = 'index', y = 'salience', color = 'chrom', hover_data=['pos', 'cxn'])
 
                 plt_m.add_hline(y=np.quantile(salience.salience, q = .95), line_dash="solid", line_color="#5d5d5d")
                 plt_m.add_hline(y=np.quantile(salience.salience, q = .99), line_dash="dash",  line_color="#2a2a2a")
@@ -999,37 +1037,50 @@ match params_run['run_mode']:
 
                 return plt_m, plt_d
             
-            # Training
-            e = validation_inp_sals
-            salience = acgt_loci.copy()
-            salience['salience'] = e.numpy(
-                ).max(axis = 1 # max over nucleotide axis
-                ).max(axis = 0 # max over observation axis
-                )
-            salience = salience.reset_index()
 
-            salience['chrom'] = salience['chrom'].astype(str)  
+            def _collapse_and_add_gff_annotations(acgt_loci = acgt_loci, 
+                                     gene_nodes_gff = gene_nodes_gff, 
+                                     e = validation_inp_sals):
+                salience = acgt_loci.copy()
+                salience['salience'] = e.numpy(
+                    ).max(axis = 1 # max over nucleotide axis
+                    ).max(axis = 0 # max over observation axis
+                    )
+                salience = salience.reset_index()
 
-            pq.write_table(pa.Table.from_pandas(salience), save_dir+'trn_salience_snpwise.parquet')
-            _plt_saliences(salience = salience, save_dir = save_dir, plt_prefix = 'trn_salience_snpwise')  
+                salience['chrom'] = salience['chrom'].astype(str)  
+                salience['cxn'] = ''
+                for i in gene_nodes_gff.index:
+                    chrom, start, end, cxn_val = gene_nodes_gff.loc[i, ['chromosome', 'start', 'end', 'cxn']]
+                    salience.loc[(
+                        (salience.chrom == str(chrom)) & 
+                        ((salience.pos >= start) & 
+                        (salience.pos <= end))
+                        ), 'cxn'] = cxn_val
+                return salience
+
+            # Training      
+            if params_data['dataloader_shuffle_train'] == False:
+                salience = _collapse_and_add_gff_annotations(
+                    acgt_loci = acgt_loci, 
+                    gene_nodes_gff = gene_nodes_gff, 
+                    e = training_inp_sals)
+                pq.write_table(pa.Table.from_pandas(salience), save_dir+f'/{params_data_subset_hash}_eval_salience_snpwise_trn.parquet')
+                _plt_saliences(salience = salience, save_dir = save_dir, plt_prefix = f'/{params_data_subset_hash}_eval_trn_salience_snpwise')  
 
             # Validation
-            e = validation_inp_sals
-            salience = acgt_loci.copy()
-            salience['salience'] = e.numpy(
-                ).max(axis = 1 # max over nucleotide axis
-                ).max(axis = 0 # max over observation axis
-                )
-            salience = salience.reset_index()
-
-            salience['chrom'] = salience['chrom'].astype(str)  
-
-            pq.write_table(pa.Table.from_pandas(salience), save_dir+'val_salience_snpwise.parquet')
-            _plt_saliences(salience = salience, save_dir = save_dir, plt_prefix = 'val_salience_snpwise')  
+            if params_data['dataloader_shuffle_valid'] == False:                  
+                salience = _collapse_and_add_gff_annotations(
+                    acgt_loci = acgt_loci, 
+                    gene_nodes_gff = gene_nodes_gff, 
+                    e = validation_inp_sals)
+                pq.write_table(pa.Table.from_pandas(salience), save_dir+f'/{params_data_subset_hash}_eval_salience_snpwise_val.parquet')
+                _plt_saliences(salience = salience, save_dir = save_dir, plt_prefix = f'/{params_data_subset_hash}_eval_val_salience_snpwise')  
 
 
             # NOTE this could also be broken up into snpwise and genewise options
             ### Gene-wise Manhattan
+            print('Calculating salience w.r.t. input (gene-wise)')
             def _collapse_salience_genewise(M_list, acgt_loci, sals):
                 # I can get the gene associations back like this. Not the same as a manhattan
                 _ = pd.DataFrame([(
@@ -1037,7 +1088,7 @@ match params_run['run_mode']:
                         int(M_list[0].row_info[e]['start']),
                         int(M_list[0].row_info[e]['stop'])
                     ) for e in M_list[0].row_info.keys()], 
-                    columns=['name', 'start', 'stop']
+                    columns=['cxn', 'start', 'stop']
                     ).sort_values('start'
                     ).reset_index(drop = True)
 
@@ -1063,14 +1114,17 @@ match params_run['run_mode']:
             training_inp_sals   = _collapse_salience_genewise(M_list = M_list, acgt_loci = acgt_loci, sals = training_inp_sals)
             validation_inp_sals = _collapse_salience_genewise(M_list = M_list, acgt_loci = acgt_loci, sals = validation_inp_sals)
 
-            _ = _plt_saliences(salience=training_inp_sals,   save_dir = save_dir, plt_prefix = 'trn_salience_genewise')
-            _ = _plt_saliences(salience=validation_inp_sals, save_dir = save_dir, plt_prefix = 'val_salience_genewise')
+            if params_data['dataloader_shuffle_train'] == False:
+                _ = _plt_saliences(salience=training_inp_sals,   save_dir = save_dir, plt_prefix = f'/{params_data_subset_hash}_eval_trn_salience_genewise')
+                pq.write_table(pa.Table.from_pandas(training_inp_sals), save_dir+f'/{params_data_subset_hash}_eval_salience_genewise_trn.parquet')
 
-            pq.write_table(pa.Table.from_pandas(training_inp_sals), save_dir+"trn_salience_snpwise.parquet")
-            pq.write_table(pa.Table.from_pandas(validation_inp_sals), save_dir+"val_salience_snpwise.parquet")
+            if params_data['dataloader_shuffle_valid'] == False:
+                _ = _plt_saliences(salience=validation_inp_sals, save_dir = save_dir, plt_prefix = f'/{params_data_subset_hash}_eval_val_salience_genewise')
+                pq.write_table(pa.Table.from_pandas(validation_inp_sals), save_dir+f'/{params_data_subset_hash}_eval_salience_genewise_val.parquet')
 
 
         if 'saliency_wab' in params_run['eval']:
+            print('Calculating salience w.r.t. weights and biases')
             # break this into two problems: 
             #   1. Collecting Gradients
             #   2. Organizing Gradients
@@ -1188,11 +1242,12 @@ match params_run['run_mode']:
             df_weight = pd.concat(df_weight)
             df_bias   = pd.concat(df_bias)
 
-            pq.write_table(pa.Table.from_pandas(df_weight), save_dir+'gradients_nodewise_weights.parquet')
-            pq.write_table(pa.Table.from_pandas(df_bias),   save_dir+'gradients_nodewise_bias.parquet')
+            pq.write_table(pa.Table.from_pandas(df_weight), save_dir+f'/{params_data_subset_hash}_eval_gradients_nodewise_weights.parquet')
+            pq.write_table(pa.Table.from_pandas(df_bias),   save_dir+f'/{params_data_subset_hash}_eval_gradients_nodewise_bias.parquet')
 
 
         if 'rho_out' in params_run['eval']:
+            print('Calculating rho w.r.t. intermediate layer output')
             # NOTE: this can take a long time.
             def _collect_rho(model, M_list, inp_dl):
 
@@ -1285,14 +1340,14 @@ match params_run['run_mode']:
             trn_rho = _collect_rho(model = model, M_list = M_list, inp_dl = training_dataloader)
             val_rho = _collect_rho(model = model, M_list = M_list, inp_dl = validation_dataloader)
 
-            pq.write_table(pa.Table.from_pandas(trn_rho), save_dir+'trn_rho_nodewise.parquet')
-            pq.write_table(pa.Table.from_pandas(val_rho), save_dir+'trn_rho_nodewise.parquet')
+            pq.write_table(pa.Table.from_pandas(trn_rho), save_dir+f'/{params_data_subset_hash}_eval_rho_nodewise_trn.parquet')
+            pq.write_table(pa.Table.from_pandas(val_rho), save_dir+f'/{params_data_subset_hash}_eval_rho_nodewise_val.parquet')
 
 
     case _:
         print('Base case not implemented!!')
         
-
+print('Done')
 
 
 
