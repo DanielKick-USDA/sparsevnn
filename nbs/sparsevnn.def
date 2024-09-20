@@ -1,0 +1,24 @@
+Bootstrap: docker 
+From: pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime
+
+%files
+    /home/kickd/Documents/vnnpaper_containers/sparsevnn /home/jovyan/sparsevnn
+
+%environment
+
+%post
+    conda install pytorch torchvision torchaudio pytorch-cuda=12.4 -c pytorch -c nvidia
+    conda install conda-forge::pytorch_sparse
+    conda install conda-forge::pytorch_scatter
+    conda install lightning -c conda-forge
+    pip3 install ax-platform
+    conda install esri::einops
+    conda install pandas
+    conda install -c conda-forge pyarrow
+    pip install graphviz
+    conda install plotly::plotly
+    conda install conda-forge::python-kaleido
+
+    pip3 install /home/jovyan/sparsevnn
+
+%runscript
