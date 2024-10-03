@@ -1,5 +1,6 @@
 Bootstrap: docker 
-From: pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime
+#From: pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime
+From: pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel
 
 %files
     /home/kickd/Documents/vnnpaper_containers/sparsevnn /home/jovyan/sparsevnn
@@ -7,18 +8,17 @@ From: pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime
 %environment
 
 %post
-    conda install pytorch torchvision torchaudio pytorch-cuda=12.4 -c pytorch -c nvidia
-    conda install conda-forge::pytorch_sparse
-    conda install conda-forge::pytorch_scatter
-    conda install lightning -c conda-forge
+    pip3 install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu124
+    pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.4.0+${CUDA}.html
     pip3 install ax-platform
-    conda install esri::einops
-    conda install pandas
-    conda install -c conda-forge pyarrow
     pip install graphviz
-    conda install plotly::plotly
-    conda install conda-forge::python-kaleido
 
+    pip3 install lightning
+    pip3 install einops
+    pip3 install pandas
+    pip3 install pyarrow
+    pip3 install graphviz
+    pip3 install plotly
+    pip3 install kaleido
+    
     pip3 install /home/jovyan/sparsevnn
-
-%runscript
