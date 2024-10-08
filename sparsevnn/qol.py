@@ -154,6 +154,7 @@ def params_data(): return {
     'holdout_percent': 0.2,
     'holdout_seed': 8923747,
     'holdout_taxa': [],
+    'holdout_taxa_ignore': [], # taxa to drop. Useful for keeping a test set truely separate
     ## 
     'dataloader_shuffle_train': True,
     'dataloader_shuffle_valid': False,
@@ -161,6 +162,7 @@ def params_data(): return {
 
 # %% ../nbs/01_qol.ipynb 15
 def params_run(): return {
+    'use_data_cache': True, # save and restore from vnn cache?
     'patch'     : False, # Should code be patched using the code in vnn_patch.py?
     
     'batch_size': 32,
