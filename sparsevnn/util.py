@@ -620,14 +620,15 @@ def acgt_filter_snps(acgt,
     # we return indexs for [F] since there is no snp sampled at a higher position.
 
     # make sure we're working with ints
-    acgt_loci.chrom = acgt_loci.chrom.astype(int)
+    acgt_loci.chrom = acgt_loci.chrom.astype(str)
     acgt_loci.pos   = acgt_loci.pos.astype(int)
 
     out = {}
 
     for i in gene_nodes_gff.index:
         node, chromosome, start, end = gene_nodes_gff.loc[i, ['cxn', 'chromosome', 'start', 'end']].tolist()
-        node, chromosome, start, end = str(node), int(chromosome), int(start), int(end)
+        node, chromosome, start, end = str(node), str(chromosome), int(start), int(end)
+
         # node, chromosome, start, end
 
         chrom_mask = (acgt_loci.chrom == chromosome)
