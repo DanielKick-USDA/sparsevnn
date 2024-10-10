@@ -23,7 +23,7 @@ import sparsevnn.qol
 # from   sparsevnn.qol  import ensure_dir_path_exists
 from   sparsevnn.core import \
     SparseLinearCustom,      \
-    dist_scale_function,    \
+    dist_scale_function,     \
     info_list_to_layer_list, \
     SparseVNN,               \
     MarkerDataset,           \
@@ -99,6 +99,7 @@ parser.add_argument("--dataloader_shuffle_valid",type=s2b, help="should this dat
 
 
 # params_run settings
+parser.add_argument("--use_data_cache", type=s2b, help="If true, attempt to load/cache data using settings hash in save name.")
 parser.add_argument("--patch",         type=s2b, help="If true, functions in `vnn_patch.py` will be loaded in.")
 parser.add_argument("--batch_size",    type=int, help="batch size for dataloader")
 parser.add_argument("--max_epoch",     type=int, help="max epoch for training")
@@ -253,8 +254,7 @@ if params_data['phno_path'] == None:
 
 ## Store Intermediate Data For Reuse ==========================================
 # use_data_cache_load = True
-use_data_cache_save = True #FIXME
-# TODO add an option to use/ignore vnn_cache
+use_data_cache = params_run['use_data_cache'] # option to use/ignore vnn_cache
 params_data_subset = {e:params_data[e] for e in [
  'species',
  'num_nucleotides',
@@ -265,27 +265,32 @@ params_data_subset = {e:params_data[e] for e in [
  'graph_source',
  'kegg_catalog',
  'graph_cxn',   
+ 'holdout_taxa_ignore',
 ]}
 
-sparsevnn.qol.ensure_dir_path_exists(dir_path = './vnn_cache/')
-
-hash_lookup = {}
-if os.path.exists('./vnn_cache/hash_lookup.json'):
-    with open('./vnn_cache/hash_lookup.json', 'r') as f:
-        hash_lookup = json.load(f)
-
-# to ensure the hash is the same we sort the keys then use encode to get the stirng as bytes
-_ = json.dumps(params_data_subset, sort_keys=True).encode()
-# using shake_256 instead sha256 because https://stackoverflow.com/questions/4567089/hash-function-that-produces-short-hashes
-params_data_subset_hash = hashlib.shake_256( _ ).hexdigest(5)
-
-if params_data_subset_hash not in hash_lookup.keys():
+if not use_data_cache:
     use_data_cache_load = False
-    # add new hash
-    hash_lookup |= {str(params_data_subset_hash):params_data_subset}
-    sparsevnn.qol.write_json(hash_lookup, './vnn_cache/hash_lookup.json')
-else:
-    use_data_cache_load = True
+
+elif use_data_cache:
+    sparsevnn.qol.ensure_dir_path_exists(dir_path = './vnn_cache/')
+
+    hash_lookup = {}
+    if os.path.exists('./vnn_cache/hash_lookup.json'):
+        with open('./vnn_cache/hash_lookup.json', 'r') as f:
+            hash_lookup = json.load(f)
+
+    # to ensure the hash is the same we sort the keys then use encode to get the stirng as bytes
+    _ = json.dumps(params_data_subset, sort_keys=True).encode()
+    # using shake_256 instead sha256 because https://stackoverflow.com/questions/4567089/hash-function-that-produces-short-hashes
+    params_data_subset_hash = hashlib.shake_256( _ ).hexdigest(5)
+
+    if params_data_subset_hash not in hash_lookup.keys():
+        use_data_cache_load = False
+        # add new hash
+        hash_lookup |= {str(params_data_subset_hash):params_data_subset}
+        sparsevnn.qol.write_json(hash_lookup, './vnn_cache/hash_lookup.json')
+    else:
+        use_data_cache_load = True
 
 
 # for reference write out these param dicts
@@ -300,20 +305,29 @@ _ = [
 ## Make Global Variables ======================================================
 
 cache_path = params_data['cache_path']
-if cache_path == './': # in this case we can't get a meaniful value unless we use the pwd
+if cache_path == './': # in this case we can't get a meaningful value unless we use the pwd
     cache_path = os.getcwd()+'/'
 lightning_log_dir = cache_path+"lightning"
 exp_name = [e for e in cache_path.split('/') if e != ''][-1]
 sparsevnn.qol.ensure_dir_path_exists(dir_path = cache_path)
 
 
+def read_pq_or_pd(file_path:str):
+    "Using file extention read a parquet -> csv -> table"
+    match file_path.split('.')[-1]:
+        case 'parquet': out = pq.read_table(file_path).to_pandas()
+        case 'csv': out = pd.read_csv(file_path)
+        case _: out = pd.read_table(file_path)
+    return out
+
+
 # Load Input Data -------------------------------------------------------------
 if use_data_cache_load:
-    phno           = pd.read_csv(f'./vnn_cache/{params_data_subset_hash}_phno.csv')
-    obs_geno_lookup= pd.read_csv(f'./vnn_cache/{params_data_subset_hash}_obs_geno_lookup.csv')
-    cxn            = pd.read_csv(f'./vnn_cache/{params_data_subset_hash}_cxn.csv')
-    acgt_loci      = pd.read_csv(f'./vnn_cache/{params_data_subset_hash}_acgt_loci.csv')
-    gene_nodes_gff = pd.read_csv(f'./vnn_cache/{params_data_subset_hash}_gene_nodes_gff.csv')
+    phno           = read_pq_or_pd(file_path=f'./vnn_cache/{params_data_subset_hash}_phno.parquet')
+    obs_geno_lookup= read_pq_or_pd(file_path=f'./vnn_cache/{params_data_subset_hash}_obs_geno_lookup.parquet')
+    cxn            = read_pq_or_pd(file_path=f'./vnn_cache/{params_data_subset_hash}_cxn.parquet')
+    acgt_loci      = read_pq_or_pd(file_path=f'./vnn_cache/{params_data_subset_hash}_acgt_loci.parquet')
+    gene_nodes_gff = read_pq_or_pd(file_path=f'./vnn_cache/{params_data_subset_hash}_gene_nodes_gff.parquet')
 
     acgt = np.load(f'./vnn_cache/{params_data_subset_hash}_acgt.npz')
     acgt = acgt['acgt']
@@ -327,7 +341,15 @@ if use_data_cache_load:
 
 elif not use_data_cache_load:
     ## Load Marker Data ===========================================================
-    hmp = pd.read_table(params_data['hmp_path'])
+    hmp = read_pq_or_pd(file_path=params_data['hmp_path'])
+    # if params_data['hmp_path'].split('.')[-1] == 'parquet':
+    #     # It's a lot faster to read in a parquet and convert it to a df. 
+    #     # This isn't a feature that's to be advertized, 
+    #     # but where I can support it I want to.
+    #     hmp = pq.read_table(params_data['hmp_path']).to_pandas()
+    # else:
+    #     hmp = pd.read_table(params_data['hmp_path'])
+
     hmp = hmp.sort_values(['chrom', 'pos']).reset_index(drop=True)
     acgt= sparsevnn.util.hmp_table_to_matrix(hmp)
 
@@ -340,36 +362,36 @@ elif not use_data_cache_load:
 
     ## Load Response Data =========================================================
     # Taxa, y1, y2 ...
-    phno = pd.read_csv(params_data['phno_path'])
+    phno = read_pq_or_pd(file_path=params_data['phno_path'])
+    # if params_data['phno_path'].split('.')[-1] == 'parquet':
+    #     phno = pq.read_table(params_data['phno_path']).to_pandas()
+    # else:
+    #     phno = pd.read_csv(params_data['phno_path'])
+    phno.Taxa = phno.Taxa.astype(str) # ensure this is a string
+
+    # disallow specific taxa. Useful for keepig a test set fully separate.
+    if params_data['holdout_taxa_ignore'] != []: 
+        params_data['holdout_taxa_ignore'] = [str(e) for e in params_data['holdout_taxa_ignore'] ] # ensure this is a string
+        mask = phno.Taxa.isin(params_data['holdout_taxa_ignore'])
+        phno = phno.loc[~mask, ].reset_index(drop = True)
+
+    # params_data['holdout_taxa_ignore']  = [11001, 11002, 22472]
 
     # Filter Taxa based on availability
     phno_taxa   = list(set(phno.Taxa.tolist()))
     shared_taxa = sorted([e for e in phno_taxa if e in acgt_taxa])
     # instead of sorting phno and extracting Geno_Idx from the index, we'll create it here and then merge it in.
     shared_taxa_geno_idx = pd.DataFrame([(i,k) for i,k in enumerate(shared_taxa)]).rename(columns = {0:'Geno_Idx', 1:'Taxa'})
-
+    
     phno = phno.loc[(phno.Taxa.isin(shared_taxa)), ].reset_index(drop = True)
-
+    
     y = np.array(phno.drop(columns='Taxa'))
     y_names = list(phno.drop(columns='Taxa'))
     print(f'The output array is of shape {y.shape}.')
 
 
     ## Prepare Lookup Tables ======================================================
-    # unique_geno = phno.loc[:, ['Taxa']].drop_duplicates().reset_index(drop=True).reset_index().rename(columns={'index':'Geno_Idx'})
-
-    # unique_geno = phno.loc[:, ['Taxa']].drop_duplicates(
-    # ).reset_index().rename(columns={'index':'Is_Phno'}
-    # ).sort_values('Taxa'                                # These are sorted to mirror `shared_taxa`
-    # ).reset_index().rename(columns={'index':'Geno_Idx'}
-    # )
-    # unique_geno.head()
-
     unique_geno = phno.loc[:, ['Taxa']].drop_duplicates().reset_index().rename(columns={'index':'Is_Phno'}).merge(shared_taxa_geno_idx)
-
-
-
-
 
     obs_geno_lookup = phno.loc[:, ['Taxa']
                             ].reset_index(
@@ -384,7 +406,7 @@ elif not use_data_cache_load:
     # Build Graph Structure -------------------------------------------------------
     match params_data['graph_source']:
         case 'table':
-            cxn = pd.read_csv(params_data['graph_cxn'])
+            cxn = read_pq_or_pd(file_path=params_data['graph_cxn'])
 
         case 'kegg':
             # (Download if necessary)
@@ -406,7 +428,6 @@ elif not use_data_cache_load:
                                             cache = True, 
                                             cache_dir = params_data['graph_cache_path'])
     ncbi2kegg = {kegg2ncbi[k]:k for k in kegg2ncbi}
-
 
 
     gff = sparsevnn.util._read_gene_annotation_table(filepath = params_data['gff_path'])
@@ -473,20 +494,44 @@ elif not use_data_cache_load:
         gene_nodes_gff = gene_nodes_gff, 
         include_adj = True)
     
-    if use_data_cache_save: 
+    # Drop any empty nodes
+    inp_node_idx_dict = {e:inp_node_idx_dict[e] for e in inp_node_idx_dict if inp_node_idx_dict[e] != []}
+    # update cxn to only include leaf nodes with inputs
+    leaves = cxn.loc[~(cxn.tgt.isin(cxn.src)), 'tgt'].tolist()
+    # drop leaves without snps
+    leaves = [e for e in leaves if e in inp_node_idx_dict]
+    # trace tgt->src to make sure that removing empty leaved doesn't leave any broken branches
+    branches = leaves.copy()
+
+    for i in range(len(cxn.tgt)):
+        new_branches = cxn.loc[(cxn.tgt.isin(branches)), 'src'].tolist()
+        if set(branches) == set(branches+new_branches):
+            # if no new branches were added then we've mapped the whole tree
+            break
+        else:
+            branches = branches + new_branches
+    branches = list(set(branches))
+    # update and drop any 
+    _ = cxn.shape[0]
+    cxn = cxn.loc[(cxn.tgt.isin(branches)), ['src', 'tgt']].reset_index(drop = True)
+    if _ != cxn.shape[0]:
+        print(f'Excludinging {_ - cxn.shape[0]} connections without associated snps from `cxn`.')
+
+    if use_data_cache: 
         ## Tables
-        phno.to_csv(f'./vnn_cache/{params_data_subset_hash}_phno.csv', index=False)
-        obs_geno_lookup.to_csv(f'./vnn_cache/{params_data_subset_hash}_obs_geno_lookup.csv', index=False)
-        cxn.to_csv(f'./vnn_cache/{params_data_subset_hash}_cxn.csv', index=False)
-        acgt_loci.to_csv(f'./vnn_cache/{params_data_subset_hash}_acgt_loci.csv', index=False)
-        gene_nodes_gff.to_csv(f'./vnn_cache/{params_data_subset_hash}_gene_nodes_gff.csv', index=False)
+        pq.write_table(pa.Table.from_pandas(phno),            f'./vnn_cache/{params_data_subset_hash}_phno.parquet')
+        pq.write_table(pa.Table.from_pandas(obs_geno_lookup), f'./vnn_cache/{params_data_subset_hash}_obs_geno_lookup.parquet')
+        pq.write_table(pa.Table.from_pandas(cxn),             f'./vnn_cache/{params_data_subset_hash}_cxn.parquet')
+        pq.write_table(pa.Table.from_pandas(acgt_loci),       f'./vnn_cache/{params_data_subset_hash}_acgt_loci.parquet')
+        pq.write_table(pa.Table.from_pandas(gene_nodes_gff),  f'./vnn_cache/{params_data_subset_hash}_gene_nodes_gff.parquet')
+        # Because this might be modified directly we're going to write it out in non-parquet form too.
+        cxn.to_csv(f'./vnn_cache/{params_data_subset_hash}_cxn.csv', index=False) 
+
         ## nd Array
         np.savez_compressed(f'./vnn_cache/{params_data_subset_hash}_acgt.npz', acgt=acgt)
 
         ## Dict
         sparsevnn.qol.write_json(inp_node_idx_dict, f'./vnn_cache/{params_data_subset_hash}_inp_node_idx_dict.json') 
-
-
 
 
 # Training Prep. --------------------------------------------------------------
@@ -734,9 +779,7 @@ if params_run['patch'] == True:
 
 
 # Model Execution -------------------------------------------------------------
-
-
-match params_run['run_mode']:
+match params_run['run_mode']: # setup tune train predict eval
     case 'setup':
         print('`setup` complete. Ready to `tune` or `train`.')
     case 'tune':
@@ -774,7 +817,7 @@ match params_run['run_mode']:
             for i in range(params_run['tune_trials']):
                 parameterization, trial_index = ax_client.get_next_trial()
                 # Local evaluation here can be replaced with deployment to external system.
-                ax_client.complete_trial(trial_index=trial_index, raw_data=evaluate(parameterization)) # FIXME by allowing for plDNN_general replacement
+                ax_client.complete_trial(trial_index=trial_index, raw_data=evaluate(parameterization)) # NOTE plDNN_general and other functions can be patched
 
             ax_client.save_to_json_file(filepath = json_path)
 
@@ -1011,7 +1054,7 @@ match params_run['run_mode']:
             if params_data['dataloader_shuffle_valid'] == False:
                 validation_inp_sals = _collect_salience_snpwise(model = model, inp_dl = validation_dataloader)
 
-            ### SNP-wise Manhattan #FIXME there's a defect in _plt_saliences
+            ### SNP-wise Manhattan #TODO 241010 - confirm if there is still a defect in _plt_saliences or if I fixed it without rm todo
             def _plt_saliences(salience, save_dir,  plt_prefix):
                 print('\n'.join(['Percentiles:']+[f'q {i} = {np.quantile(salience.salience, q = i)}' for i in [.95, .99, .999]]))
                 
