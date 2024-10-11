@@ -252,6 +252,7 @@ if params_data['phno_path'] == None:
         params_data['phno_path'] = _
         print(f'No `phno_path` specified. Proceeding with {_}.')
 
+
 ## Store Intermediate Data For Reuse ==========================================
 # use_data_cache_load = True
 use_data_cache = params_run['use_data_cache'] # option to use/ignore vnn_cache
@@ -1054,7 +1055,7 @@ match params_run['run_mode']: # setup tune train predict eval
             if params_data['dataloader_shuffle_valid'] == False:
                 validation_inp_sals = _collect_salience_snpwise(model = model, inp_dl = validation_dataloader)
 
-            ### SNP-wise Manhattan #TODO 241010 - confirm if there is still a defect in _plt_saliences or if I fixed it without rm todo
+            ### SNP-wise Manhattan 
             def _plt_saliences(salience, save_dir,  plt_prefix):
                 print('\n'.join(['Percentiles:']+[f'q {i} = {np.quantile(salience.salience, q = i)}' for i in [.95, .99, .999]]))
                 
@@ -1092,13 +1093,14 @@ match params_run['run_mode']: # setup tune train predict eval
                 salience = salience.reset_index()
 
                 salience['chrom'] = salience['chrom'].astype(str)  
+                salience['pos']   = salience['pos'].astype(int)  
                 salience['cxn'] = ''
                 for i in gene_nodes_gff.index:
                     chrom, start, end, cxn_val = gene_nodes_gff.loc[i, ['chromosome', 'start', 'end', 'cxn']]
                     salience.loc[(
-                        (salience.chrom == str(chrom)) & 
-                        ((salience.pos >= start) & 
-                        (salience.pos <= end))
+                        (salience.chrom == str(chrom)) &
+                        ((salience.pos  >= int(start)) & 
+                         (salience.pos  <= int(end)))
                         ), 'cxn'] = cxn_val
                 return salience
 
