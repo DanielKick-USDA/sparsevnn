@@ -1028,6 +1028,10 @@ match params_run['run_mode']: # setup tune train predict eval
                 
                 # get saliency for all obs given model, dataloader
                 def _get_saliency(y_i, x_i, model):
+                    if (torch.cuda.torch.cuda.is_available() & (x_i.get_device() == -1)):
+                        y_i, x_i = y_i.to('cuda'), x_i.to('cuda')
+                        model.to('cuda')
+
                     # y_i, x_i = (y_i.to('cpu'), x_i.to('cpu'))
                     x_i.requires_grad_()
                     model.eval()
@@ -1039,16 +1043,24 @@ match params_run['run_mode']: # setup tune train predict eval
                     optimizer.zero_grad()
                     loss.backward()
                     out = x_i.grad
+                    out = out.to('cpu').numpy()
+                    # for output size 
+                    # reshape to b,n,l
+                    out = out.reshape(out.shape[0], -1, params_data['num_nucleotides']).swapaxes(1,2)
+                    # reduce to max over nucleotide axis
+                    out = out.max(axis = 1) # max over nucleotide axis
+                    out.shape
                     return out
 
 
                 out = []
                 for i, (y,x) in enumerate(inp_dl):
                     out.append(_get_saliency(y_i = y, x_i = x, model = model))
-                out = torch.concat(out)
+                # out = torch.concat(out)
+                out = np.concatenate(out)
 
                 #reverse workup for acgt_tensor to get (obs, nuc, len)
-                out = out.reshape(out.shape[0], -1, params_data['num_nucleotides']).swapaxes(1,2)
+                # out = out.reshape(out.shape[0], -1, params_data['num_nucleotides']).swapaxes(1,2)
                 return out
 
             if params_data['dataloader_shuffle_train'] == False:
@@ -1088,10 +1100,12 @@ match params_run['run_mode']: # setup tune train predict eval
                                      gene_nodes_gff = gene_nodes_gff, 
                                      e = validation_inp_sals):
                 salience = acgt_loci.copy()
-                salience['salience'] = e.numpy(
-                    ).max(axis = 1 # max over nucleotide axis
-                    ).max(axis = 0 # max over observation axis
-                    )
+                salience['salience'] = e.max(axis = 0) # max over observation axis
+                # salience['salience'] = e.numpy(
+                    # NOTE 10/15 collapse over nucleotide axis before concatenation.
+                    # ).max(axis = 1 # max over nucleotide axis
+                    # ).max(axis = 0 # max over observation axis
+                    # )
                 salience = salience.reset_index()
 
                 salience['chrom'] = salience['chrom'].astype(str)  
@@ -1142,13 +1156,14 @@ match params_run['run_mode']: # setup tune train predict eval
                 _['start'] = (_['start'] / params_data['num_nucleotides']).astype(int) # M_list is in reference to the flattened data.
                 _['stop']  = (_['stop']  / params_data['num_nucleotides']).astype(int)
 
-                _['chrom'] = 0
+                _['chrom'] = ''
                 _['pos'] = 0
                 _['max_sal'] = 0.0
 
                 for i in _.index:
                     start, stop = _.loc[i, ['start', 'stop']]
-                    _.loc[i, ['salience']] = float( sals[:, :, start:stop].max().item() )
+                    # _.loc[i, ['salience']] = float( sals[:, :, start:stop].max().item() )
+                    _.loc[i, ['salience']] = float( sals[:, start:stop].max().item() )
                     _.loc[i, ['chrom', 'pos']]  = acgt_loci.loc[round(np.mean([start, stop])), ['chrom','pos']]
 
                 _['chrom'] = _['chrom'].astype(str) 
@@ -1253,7 +1268,7 @@ match params_run['run_mode']: # setup tune train predict eval
             df_weight = []
             df_bias = []
 
-            for i in _.index:
+            for i in tqdm(_.index):
                 # print(i)
                 layer, k, start, stop = _.loc[i, ].values
                 # the first two [0] are to get the first index of the (2, #) coordinate tensor
