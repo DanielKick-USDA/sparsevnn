@@ -1,26 +1,17 @@
-# import pprint
-# print = pprint.PrettyPrinter(indent=4).pprint
-#TODO move all the funcitons (and patching) to the top of the script
 import os, argparse, re, json, hashlib, pickle # M_list is pickled
-# os.chdir('/home/kickd/Documents/sparsevnn/nbs/demo_maize')
 
 import numpy  as np
 import pandas as pd
-
 import scipy.stats # for spearmanr
-
-import einops
-
 ## Model building ====
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from   torch.utils.data import Dataset, DataLoader
-
+import einops
 import sparsevnn
 import sparsevnn.util
 import sparsevnn.qol
-# from   sparsevnn.qol  import ensure_dir_path_exists
 from   sparsevnn.core import \
     SparseLinearCustom,      \
     dist_scale_function,     \
@@ -57,37 +48,6 @@ params_list = sparsevnn.qol.params_list()
 # values in `params_data` and `params_run` are the only ones I expect to be updated
 params_data_keys = set(params_data.keys()).copy()
 params_run_keys  = set(params_run.keys()).copy()
-
-
-
-
-
-# import os
-# os.chdir('/home/kickd/Documents/sparsevnn_study/data_demo')
-
-# params_data = {
-#     "cache_path": "./",
-#     "dataloader_shuffle_train": False,
-#     "dataloader_shuffle_valid": False,
-#     "gff_path": "./shared_data/GCF_000001215.4_Release_6_plus_ISO1_MT_genomic.gff",
-#     "graph_cache_path": "./shared_data/",
-#     "graph_cxn": None,
-#     "graph_source": "kegg",
-#     "hmp_path": "./shared_data/ADH_tiny_hzg.hmp.txt.parquet",
-#     "holdout_percent": 0.2,
-#     "holdout_seed": 8923747,
-#     "holdout_taxa": [],
-#     "holdout_taxa_ignore": [],
-#     "holdout_type": "percent",
-#     "kegg_catalog": "00001",
-#     "model_path": "./models/data_demo/version_0/version_0.pt",
-#     "num_nucleotides": 4,
-#     "phno_path": "./shared_data/ADH_tiny_hzg.csv",
-#     "species": "dme"
-# }
-
-
-
 
 
 
@@ -334,7 +294,6 @@ _ = [
     sparsevnn.qol.write_json(a, f"{params_data['cache_path']}{b}.json") 
     for a,b in zip([params_data, params_run, params, params_list],
                    ['params_data', 'params_run', 'params', 'params_list'])
-    # if not os.path.exists(f'{params_data['cache_path']}{b}.json')
                     ]
 
 
@@ -378,14 +337,6 @@ if use_data_cache_load:
 elif not use_data_cache_load:
     ## Load Marker Data ===========================================================
     hmp = read_pq_or_pd(file_path=params_data['hmp_path'])
-    # if params_data['hmp_path'].split('.')[-1] == 'parquet':
-    #     # It's a lot faster to read in a parquet and convert it to a df. 
-    #     # This isn't a feature that's to be advertized, 
-    #     # but where I can support it I want to.
-    #     hmp = pq.read_table(params_data['hmp_path']).to_pandas()
-    # else:
-    #     hmp = pd.read_table(params_data['hmp_path'])
-
     hmp = hmp.sort_values(['chrom', 'pos']).reset_index(drop=True)
     acgt= sparsevnn.util.hmp_table_to_matrix(hmp)
 
@@ -399,10 +350,6 @@ elif not use_data_cache_load:
     ## Load Response Data =========================================================
     # Taxa, y1, y2 ...
     phno = read_pq_or_pd(file_path=params_data['phno_path'])
-    # if params_data['phno_path'].split('.')[-1] == 'parquet':
-    #     phno = pq.read_table(params_data['phno_path']).to_pandas()
-    # else:
-    #     phno = pd.read_csv(params_data['phno_path'])
     phno.Taxa = phno.Taxa.astype(str) # ensure this is a string
 
     # disallow specific taxa. Useful for keepig a test set fully separate.
@@ -410,8 +357,6 @@ elif not use_data_cache_load:
         params_data['holdout_taxa_ignore'] = [str(e) for e in params_data['holdout_taxa_ignore'] ] # ensure this is a string
         mask = phno.Taxa.isin(params_data['holdout_taxa_ignore'])
         phno = phno.loc[~mask, ].reset_index(drop = True)
-
-    # params_data['holdout_taxa_ignore']  = [11001, 11002, 22472]
 
     # Filter Taxa based on availability
     phno_taxa   = list(set(phno.Taxa.tolist()))
@@ -436,8 +381,6 @@ elif not use_data_cache_load:
                             ).drop(columns = ['Taxa']
                             ).sort_values('Phno_Idx'
                             ).loc[:, ['Phno_Idx', 'Geno_Idx', 'Is_Phno']]
-    # obs_geno_lookup
-
 
     # Build Graph Structure -------------------------------------------------------
     match params_data['graph_source']:
@@ -446,17 +389,16 @@ elif not use_data_cache_load:
 
         case 'kegg':
             # (Download if necessary)
-            # catalog = sparsevnn.util._get_available_catalog(species = 'gmx')
-            inp = sparsevnn.util._get_json(species = params_data['species'], 
-                                        catalog_num = params_data['kegg_catalog'], 
-                                        cache = True, 
-                                        cache_dir = params_data['graph_cache_path'])
+            # catalog = sparsevnn.util._get_available_catalog(species = 'gmx') # How to see the options
+            inp = sparsevnn.util._get_json(
+                species = params_data['species'], 
+                catalog_num = params_data['kegg_catalog'], 
+                cache = True, 
+                cache_dir = params_data['graph_cache_path'])
             inp = sparsevnn.util._peel(inp=inp)
             cxn = sparsevnn.util._connections_from_peeled_json(inp, max_iter = 1000, 
                                                             print_queue_len = False)
             cxn = pd.DataFrame(cxn, columns=['src', 'tgt'])
-            # cxn.head()
-
 
 
     # Match graph inputs to gene models (parsing GFF annotation file)
@@ -474,7 +416,6 @@ elif not use_data_cache_load:
     gff = gff.loc[(gff.type == 'gene'), ['chromosome', 'start', 'end', 'ID', 'Dbxref']]
     # Drop any without a known chromosome.
     gff = gff.loc[(gff.chromosome != 'Unknown')]
-    # gff.head()
 
 
     # Now we can use `kegg2ncbi` to match up the input nodes with those that have a ncbi-geneid
@@ -509,12 +450,6 @@ elif not use_data_cache_load:
     # Because we use the position in acgt_taxa to map a shared_taxa entry to a position we only 
     # really need to check that all the shared entries exist in acgt_taxa
     assert [] == [e for e in shared_taxa if e not in acgt_taxa]
-    # confirm that shared_taxa and the geno_index have the same order 
-    # assert False == (False in [i == j for i,j in zip(
-    #     unique_geno.sort_values('Geno_Idx').reset_index(drop=True).Taxa.tolist(), 
-    #     shared_taxa)])
-    # the problem here seems to be that unique_geno.Taxa is the same as shared_taxa but when we sort by Geno_Idx it gets messed up.
-
 
     acgt, taxa2idx = sparsevnn.util.acgt_filter_taxa(
         acgt=acgt,
@@ -579,12 +514,10 @@ myvnn = sparsevnn.util.mk_vnnhelper(
         num_nucleotides = 4, # this could also be 1 for major/minor allele. 
         inp_tensor_lookup = inp_node_idx_dict,
         params = params
-            )
+        )
 
-# start of vnn_factory_2 replacement
-# dependancy_order = sparsevnn.util.order_connections(inp = myvnn.edge_dict, node_names=None)
+# build dependancy dictionary
 dd = sparsevnn.core.mk_NodeGroups(edge_dict=myvnn.edge_dict, dependancy_order=myvnn.dependancy_order)
-# dd.keys()
 
 M_list = [
     structured_layer_info(
@@ -598,8 +531,6 @@ M_list = [
     inp_tensor_lookup = (lambda x: inp_node_idx_dict if x == 0 else None)(ii)
     )
     for ii in sorted(list(dd.keys()))]
-
-# [list(e.weight.shape) for e in M_list]
 
 print('\n'.join(
     ['Layer\tinp\tout\teye'
@@ -941,7 +872,6 @@ match params_run['run_mode']: # setup tune train predict eval
             nums = [int(e.split('_')[-1]) for e in fls]
             torch.save(res.model.mod.state_dict(), f'{log_path}/version_{max(nums)}/version_{max(nums)}.pt')
             sparsevnn.qol.write_json(params,       f'{log_path}/version_{max(nums)}/version_{max(nums)}.json')
-            # sparsevnn.qol.write_json(res_M_list,   f'{log_path}/version_{max(nums)}/version_{max(nums)}_M_list.json')
 
             with open(f'{log_path}/version_{max(nums)}/version_{max(nums)}_M_list.pkl', 'wb') as f:
                 pickle.dump(res_M_list, f, protocol=5)
@@ -1066,7 +996,6 @@ match params_run['run_mode']: # setup tune train predict eval
             # Here we read in the associated json in case the model specification is different
             # from the current params file.
             params = sparsevnn.qol.read_json('.'.join(params_data['model_path'].split('.')[0:-1]+['json'])),
-            # params = params,
             params_data = params_data,
             edge_dict = cxn_dict,
             inp_tensor_lookup = inp_node_idx_dict,
@@ -1091,11 +1020,6 @@ match params_run['run_mode']: # setup tune train predict eval
 
                 # get saliency for all obs given model, dataloader
                 def _get_saliency(y_i, x_i, model):
-                    # if (torch.cuda.torch.cuda.is_available() & (x_i.get_device() == -1)):
-                    #     y_i, x_i = y_i.to('cuda'), x_i.to('cuda')
-                    #     model.to('cuda')
-
-                    # y_i, x_i = (y_i.to('cpu'), x_i.to('cpu'))
                     x_i.requires_grad_()
                     model.eval()
 
@@ -1122,11 +1046,9 @@ match params_run['run_mode']: # setup tune train predict eval
                 out = []
                 for i, (y,x) in enumerate(inp_dl):
                     out.append(_get_saliency(y_i = y, x_i = x, model = model))
-                # out = torch.concat(out)
                 out = np.concatenate(out)
 
                 #reverse workup for acgt_tensor to get (obs, nuc, len)
-                # out = out.reshape(out.shape[0], -1, params_data['num_nucleotides']).swapaxes(1,2)
                 return out
 
             if params_data['dataloader_shuffle_train'] == False:
@@ -1167,11 +1089,6 @@ match params_run['run_mode']: # setup tune train predict eval
                                      e = validation_inp_sals):
                 salience = acgt_loci.copy()
                 salience['salience'] = e.max(axis = 0) # max over observation axis
-                # salience['salience'] = e.numpy(
-                    # NOTE 10/15 collapse over nucleotide axis before concatenation.
-                    # ).max(axis = 1 # max over nucleotide axis
-                    # ).max(axis = 0 # max over observation axis
-                    # )
                 salience = salience.reset_index()
 
                 salience['chrom'] = salience['chrom'].astype(str)  
@@ -1228,7 +1145,6 @@ match params_run['run_mode']: # setup tune train predict eval
 
                 for i in _.index:
                     start, stop = _.loc[i, ['start', 'stop']]
-                    # _.loc[i, ['salience']] = float( sals[:, :, start:stop].max().item() )
                     _.loc[i, ['salience']] = float( sals[:, start:stop].max().item() )
                     _.loc[i, ['chrom', 'pos']]  = acgt_loci.loc[round(np.mean([start, stop])), ['chrom','pos']]
 
@@ -1256,8 +1172,7 @@ match params_run['run_mode']: # setup tune train predict eval
             # break this into two problems: 
             #   1. Collecting Gradients
             #   2. Organizing Gradients
-
-
+            # 
             # Training a model with the same hyperparameters sometimes results in gradients that are max 0 and sometimes not. 
             # This seems to be a gradient attenuation problem. On one run I got max(abs(grads)) that look like so:
             # trn 0 -> 0 -> 0 -> 0 -> 0 -> 0 -> 0 -> 0.000 -> 0.001 -> 0.001
@@ -1265,9 +1180,7 @@ match params_run['run_mode']: # setup tune train predict eval
             # Observed with gmx data and params: 
             # "{'default_decay_rate': 0, 'default_drop_nodes_edge': 0.0, 'default_drop_nodes_inp': 0.0, 'default_drop_nodes_out': 0.0, 'default_out_nodes_edge': 2, 
             #   'default_out_nodes_inp': 1, 'default_out_nodes_out': 2, 'default_reps_nodes_edge': 2, 'default_reps_nodes_inp': 1, 'default_reps_nodes_out': 1}"
-            def collect_gradients(model, inp_dl = training_dataloader):
-
-                
+            def collect_gradients(model, inp_dl = training_dataloader):               
                 "Returns a tuple of weight grads, bias grads"
                 # Setup list of lists [layer, ..., layer] with batch in layer
                 gradient_weight_holder = [[] for i in model.layer_list]
@@ -1292,14 +1205,10 @@ match params_run['run_mode']: # setup tune train predict eval
                         gradient_weight_holder[level].append( model.layer_list[level].weights.grad.detach().cpu().numpy() )
                         gradient_bias_holder[level].append( model.layer_list[level].bias.grad.detach().cpu().numpy() )
 
-                    # print((i, len(gradient_obs), len(gradient_holder[-1])))
-                    # break
-
                 gradient_obs = np.array(gradient_obs)
                 # convert to percent of training set
                 gradient_obs = gradient_obs/gradient_obs.sum()
                 gradient_obs = gradient_obs[:, None]
-
 
                 def _scale_gradients(gradient_list, gradient_obs): # gradient list should be gradient_holder[-1]
                     _ = np.concatenate(gradient_list, 0).reshape(gradient_obs.shape[0], -1)
@@ -1457,37 +1366,6 @@ match params_run['run_mode']: # setup tune train predict eval
                     y_actual.append( y.swapaxes(0,1).cpu().detach().numpy() )
                     node_out.append( tmp )
 
-                
-                # # Original version
-                # y_actual = [] # Track the actual y and the...
-                # node_out = [] # outputs of each node
-
-                # for i, (y,x) in tqdm(enumerate(inp_dl)):
-                #     # This is the .forward() method adapted to store all the interediate tensors
-                #     with torch.no_grad():
-                #         tensor_out = [x]
-                #         for l in model.layer_list:
-                #             tensor_out.append(l(tensor_out[-1]))
-                            
-                #     # print(model(x_i)[0:5], tensor_out[-1][0:5]) # This shows that ther are the same 
-
-                #     # Organize the intermediate outputs into a long structured matrix
-                #     _ = []
-                #     for node in out.node_forward_idx:
-                #         mask = (out.node_forward_idx == node)
-                #         start = out.loc[mask, 'start'].values[0].astype(int)
-                #         stop  = out.loc[mask, 'stop' ].values[0].astype(int)
-                #         layer = out.loc[mask, 'layer'].values[0].astype(int)
-
-                #         _.append(tensor_out[layer][:, start:stop])
-
-                #     # these are all in the shape (obs, vals) so we need to concat and transpose to match output_tracker
-                #     tmp = torch.concat(_, dim=1).swapaxes(0,1).numpy()
-
-                #     y_actual.append( y.swapaxes(0,1).numpy() )
-                #     node_out.append( tmp )
-
-
                 y_actual = np.concatenate(y_actual, axis = 1) # dim (y var,  obs )
                 node_out = np.concatenate(node_out, axis = 1) # dim (nodes x val per node,  obs )
 
@@ -1527,14 +1405,3 @@ match params_run['run_mode']: # setup tune train predict eval
         print('Base case not implemented!!')
         
 print('Done')
-
-
-
-
-
-## Model Prep. ================================================================
-# sparsevnn.util.intersect_cxn_gff_nodes
-# sparsevnn.util.acgt_filter_taxa
-# sparsevnn.util.acgt_filter_snps
-# sparsevnn.util.filter_connection_df
-# sparsevnn.util.mk_vnnhelper
