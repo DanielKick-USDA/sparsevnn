@@ -48,6 +48,7 @@ from tqdm import tqdm
 
 torch.set_float32_matmul_precision('medium')
 
+
 # Default values are stored in quality of life.
 params_data = sparsevnn.qol.params_data()
 params_run  = sparsevnn.qol.params_run()
@@ -56,6 +57,38 @@ params_list = sparsevnn.qol.params_list()
 # values in `params_data` and `params_run` are the only ones I expect to be updated
 params_data_keys = set(params_data.keys()).copy()
 params_run_keys  = set(params_run.keys()).copy()
+
+
+
+
+
+# import os
+# os.chdir('/home/kickd/Documents/sparsevnn_study/data_demo')
+
+# params_data = {
+#     "cache_path": "./",
+#     "dataloader_shuffle_train": False,
+#     "dataloader_shuffle_valid": False,
+#     "gff_path": "./shared_data/GCF_000001215.4_Release_6_plus_ISO1_MT_genomic.gff",
+#     "graph_cache_path": "./shared_data/",
+#     "graph_cxn": None,
+#     "graph_source": "kegg",
+#     "hmp_path": "./shared_data/ADH_tiny_hzg.hmp.txt.parquet",
+#     "holdout_percent": 0.2,
+#     "holdout_seed": 8923747,
+#     "holdout_taxa": [],
+#     "holdout_taxa_ignore": [],
+#     "holdout_type": "percent",
+#     "kegg_catalog": "00001",
+#     "model_path": "./models/data_demo/version_0/version_0.pt",
+#     "num_nucleotides": 4,
+#     "phno_path": "./shared_data/ADH_tiny_hzg.csv",
+#     "species": "dme"
+# }
+
+
+
+
 
 
 # Update Default Parameters ---------------------------------------------------
@@ -630,28 +663,53 @@ y_s = y[train_idx].std(axis=0)
 y = (y - y_c)/y_s
 
 
+## send to gpu if available:
+if torch.cuda.is_available():
+    training_dataloader = DataLoader(
+        MarkerDataset(
+            lookup_obs = torch.from_numpy(np.array(train_idx)).to('cuda'),
+            G = acgt_tensor.to('cuda'),
+            y = y.to(torch.float32).to('cuda'),
+            lookup_geno = torch.from_numpy(obs_geno_lookup.to_numpy()).to('cuda')
+            ),
+            batch_size = params_run['batch_size'],
+            shuffle = params_data['dataloader_shuffle_train']
+    )
 
-training_dataloader = DataLoader(
-    MarkerDataset(
-        lookup_obs = torch.from_numpy(np.array(train_idx)),
-        G = acgt_tensor,
-        y = y.to(torch.float32),
-        lookup_geno = torch.from_numpy(obs_geno_lookup.to_numpy())
-        ),
-        batch_size = params_run['batch_size'],
-        shuffle = params_data['dataloader_shuffle_train']
-)
+    validation_dataloader = DataLoader(
+        MarkerDataset(
+            lookup_obs = torch.from_numpy(np.array(test_idx)).to('cuda'),
+            G = acgt_tensor.to('cuda'),
+            y = y.to(torch.float32).to('cuda'),
+            lookup_geno = torch.from_numpy(obs_geno_lookup.to_numpy()).to('cuda')
+            ),
+            batch_size = params_run['batch_size'],
+            shuffle = params_data['dataloader_shuffle_valid']  
+    )
+else:
+    training_dataloader = DataLoader(
+        MarkerDataset(
+            lookup_obs = torch.from_numpy(np.array(train_idx)),
+            G = acgt_tensor,
+            y = y.to(torch.float32),
+            lookup_geno = torch.from_numpy(obs_geno_lookup.to_numpy())
+            ),
+            batch_size = params_run['batch_size'],
+            shuffle = params_data['dataloader_shuffle_train']
+    )
 
-validation_dataloader = DataLoader(
-    MarkerDataset(
-        lookup_obs = torch.from_numpy(np.array(test_idx)),
-        G = acgt_tensor,
-        y = y.to(torch.float32),
-        lookup_geno = torch.from_numpy(obs_geno_lookup.to_numpy())
-        ),
-        batch_size = params_run['batch_size'],
-        shuffle = params_data['dataloader_shuffle_valid']  
-)
+    validation_dataloader = DataLoader(
+        MarkerDataset(
+            lookup_obs = torch.from_numpy(np.array(test_idx)),
+            G = acgt_tensor,
+            y = y.to(torch.float32),
+            lookup_geno = torch.from_numpy(obs_geno_lookup.to_numpy())
+            ),
+            batch_size = params_run['batch_size'],
+            shuffle = params_data['dataloader_shuffle_valid']  
+    )
+
+
 
 # next(iter(training_dataloader))
 
@@ -925,6 +983,9 @@ match params_run['run_mode']: # setup tune train predict eval
         pq.write_table(pa.Table.from_pandas(pd.DataFrame(y_s.numpy()[:,None].T, columns=y_names)), save_dir+f'/{params_data_subset_hash}_yvar_cs_scale.parquet')
 
         def _collect_predictions(model, inp_dl):
+            # check that model is on the same device as the data
+            if next(iter(inp_dl))[0].get_device() != -1:
+                model = model.to('cuda')
             # as a sanity check we'll save the true y's. That will allow for 
             yvar, yhat = [], []
             # only get the validation dataloader if the training dataloader is shuffled.
@@ -1020,17 +1081,19 @@ match params_run['run_mode']: # setup tune train predict eval
 
         if 'saliency_inp' in params_run['eval']:     
             print('Calculating salience w.r.t. input (snp-wise)')
-
             model = model.eval()
 
             # iterate over dataloader and aggregate all of the saliences for the input data
             def _collect_salience_snpwise(model, inp_dl):
-                
+                # check that model is on the same device as the data
+                if next(iter(inp_dl))[0].get_device() != -1:
+                    model = model.to('cuda')
+
                 # get saliency for all obs given model, dataloader
                 def _get_saliency(y_i, x_i, model):
-                    if (torch.cuda.torch.cuda.is_available() & (x_i.get_device() == -1)):
-                        y_i, x_i = y_i.to('cuda'), x_i.to('cuda')
-                        model.to('cuda')
+                    # if (torch.cuda.torch.cuda.is_available() & (x_i.get_device() == -1)):
+                    #     y_i, x_i = y_i.to('cuda'), x_i.to('cuda')
+                    #     model.to('cuda')
 
                     # y_i, x_i = (y_i.to('cpu'), x_i.to('cpu'))
                     x_i.requires_grad_()
@@ -1052,6 +1115,9 @@ match params_run['run_mode']: # setup tune train predict eval
                     out.shape
                     return out
 
+                out = []
+                for i, (y,x) in enumerate(inp_dl):
+                    break
 
                 out = []
                 for i, (y,x) in enumerate(inp_dl):
@@ -1119,7 +1185,7 @@ match params_run['run_mode']: # setup tune train predict eval
                          (salience.pos  <= int(end)))
                         ), 'cxn'] = cxn_val
                 return salience
-
+            
             # Training      
             if params_data['dataloader_shuffle_train'] == False:
                 salience = _collapse_and_add_gff_annotations(
@@ -1172,7 +1238,7 @@ match params_run['run_mode']: # setup tune train predict eval
 
                 return salience
 
-
+            
             training_inp_sals   = _collapse_salience_genewise(M_list = M_list, acgt_loci = acgt_loci, sals = training_inp_sals)
             validation_inp_sals = _collapse_salience_genewise(M_list = M_list, acgt_loci = acgt_loci, sals = validation_inp_sals)
 
@@ -1200,6 +1266,8 @@ match params_run['run_mode']: # setup tune train predict eval
             # "{'default_decay_rate': 0, 'default_drop_nodes_edge': 0.0, 'default_drop_nodes_inp': 0.0, 'default_drop_nodes_out': 0.0, 'default_out_nodes_edge': 2, 
             #   'default_out_nodes_inp': 1, 'default_out_nodes_out': 2, 'default_reps_nodes_edge': 2, 'default_reps_nodes_inp': 1, 'default_reps_nodes_out': 1}"
             def collect_gradients(model, inp_dl = training_dataloader):
+
+                
                 "Returns a tuple of weight grads, bias grads"
                 # Setup list of lists [layer, ..., layer] with batch in layer
                 gradient_weight_holder = [[] for i in model.layer_list]
@@ -1244,13 +1312,14 @@ match params_run['run_mode']: # setup tune train predict eval
                 gradient_bias_holder = [_scale_gradients(gradient_list = e, gradient_obs = gradient_obs) for e in gradient_bias_holder]
                 
                 return gradient_weight_holder, gradient_bias_holder
-
+            
             training_weight_grads   = collect_gradients(model = model, inp_dl = training_dataloader)
             validation_weight_grads = collect_gradients(model = model, inp_dl = validation_dataloader)
 
 
             coordinates = [e.connectivity for e in model.layer_list]
             # rearrange into records of (layer, key, start, stop)
+            
             col_info = [[
                 (layer, 
                 k, 
@@ -1268,7 +1337,7 @@ match params_run['run_mode']: # setup tune train predict eval
             df_weight = []
             df_bias = []
 
-            for i in tqdm(_.index):
+            for i in tqdm(_.index, ascii = True, desc = 'Appending weights and biases'):
                 # print(i)
                 layer, k, start, stop = _.loc[i, ].values
                 # the first two [0] are to get the first index of the (2, #) coordinate tensor
@@ -1300,7 +1369,7 @@ match params_run['run_mode']: # setup tune train predict eval
                     'val_bias_grads': validation_weight_grads[1][layer][start:stop] # bias
                     }
                     ))
-                
+            
             df_weight = pd.concat(df_weight)
             df_bias   = pd.concat(df_bias)
 
@@ -1311,21 +1380,24 @@ match params_run['run_mode']: # setup tune train predict eval
         if 'rho_out' in params_run['eval']:
             print('Calculating rho w.r.t. intermediate layer output')
             # NOTE: this can take a long time.
+
             def _collect_rho(model, M_list, inp_dl):
+                if next(iter(inp_dl))[0].get_device() != -1:
+                    model = model.to('cuda')
 
                 # Convert M_list into a usable lookup
                 out = []
-                for i in tqdm(range(len(M_list))):
+                for i in tqdm(range(len(M_list)), ascii = True, desc = 'Building lookup table'):
                     # break down a `structured_layer_info` class into a df
                     slinfo = M_list[i]
-                    _ = [(k, int(slinfo.col_info[k]['start']), int(slinfo.col_info[k]['stop'])) for k in slinfo.col_info.keys()]
+                    _ = [(k, int(slinfo.row_info[k]['start']), int(slinfo.row_info[k]['stop'])) for k in slinfo.row_info.keys()]
                     _ = pd.DataFrame(_, columns=['node', 'start', 'stop'])
                     _['layer'] = i
                     out.append(_)
+
                 out = pd.concat(out)
 
                 out = out.reset_index(drop=True).reset_index().rename(columns={'index':'node_forward_idx'})
-
 
                 # table with rows being (nodes x outputs per node) and cols being (obs) 
                 output_tracker = pd.DataFrame(
@@ -1366,19 +1438,23 @@ match params_run['run_mode']: # setup tune train predict eval
                 node_out = [] # outputs of each node
 
 
-                for i, (y,x) in tqdm(enumerate(inp_dl)):
+                for i, (y,x) in tqdm(enumerate(inp_dl), ascii = True, desc = 'Conducting forward pass'):                   
                     # This is the .forward() method adapted to store all the interediate tensors
                     with torch.no_grad():
                         tensor_out = [x]
                         for l in model.layer_list:
                             tensor_out.append(l(tensor_out[-1]))
 
+                    tensor_out = [e.cpu().detach().numpy() for e in tensor_out]
+            
                     _ = []
                     for layer in sorted(list(set(lookup.layer))):
                         _.append( tensor_out[layer][:, lookup.loc[(lookup.layer == layer), 'idx'].tolist()] )
-                    tmp = torch.concat(_, dim=1).swapaxes(0,1).numpy()
-                    
-                    y_actual.append( y.swapaxes(0,1).numpy() )
+                    # tmp = torch.concat(_, dim=1).swapaxes(0,1).numpy()
+                    tmp = np.concatenate(_, axis=1).swapaxes(0,1)
+
+                    # y_actual.append( y.swapaxes(0,1).numpy() )
+                    y_actual.append( y.swapaxes(0,1).cpu().detach().numpy() )
                     node_out.append( tmp )
 
                 
@@ -1386,7 +1462,6 @@ match params_run['run_mode']: # setup tune train predict eval
                 # y_actual = [] # Track the actual y and the...
                 # node_out = [] # outputs of each node
 
-                # print(f'{datetime.now()} in _collect_rho forward pass')
                 # for i, (y,x) in tqdm(enumerate(inp_dl)):
                 #     # This is the .forward() method adapted to store all the interediate tensors
                 #     with torch.no_grad():
@@ -1412,7 +1487,7 @@ match params_run['run_mode']: # setup tune train predict eval
                 #     y_actual.append( y.swapaxes(0,1).numpy() )
                 #     node_out.append( tmp )
 
-                print(f'{datetime.now()} in _collect_rho concat')
+
                 y_actual = np.concatenate(y_actual, axis = 1) # dim (y var,  obs )
                 node_out = np.concatenate(node_out, axis = 1) # dim (nodes x val per node,  obs )
 
@@ -1421,7 +1496,7 @@ match params_run['run_mode']: # setup tune train predict eval
                 rho_val = np.zeros((y_actual.shape[0], node_out.shape[0]))
                 rho_sig = np.zeros_like(rho_val)
 
-                for y_i in tqdm(range(rho_val.shape[0])):
+                for y_i in tqdm(range(rho_val.shape[0]), ascii = True, desc = 'Calculating spearman\'s rho for all y vars'):
                     for n_i in range(rho_val.shape[1]):
                         if ((y_actual[y_i, :].std() == 0.0) | 
                             (node_out[n_i, :].std() == 0.0)):
@@ -1433,7 +1508,6 @@ match params_run['run_mode']: # setup tune train predict eval
                         rho_val[y_i, n_i] = val
                         rho_sig[y_i, n_i] = sig
 
-
                 output_tracker = pd.concat([
                     output_tracker, 
                     pd.DataFrame(rho_val.swapaxes(0,1), columns=y_names),
@@ -1441,7 +1515,6 @@ match params_run['run_mode']: # setup tune train predict eval
                     ], axis=1)
 
                 return output_tracker
-
 
             trn_rho = _collect_rho(model = model, M_list = M_list, inp_dl = training_dataloader)
             val_rho = _collect_rho(model = model, M_list = M_list, inp_dl = validation_dataloader)
