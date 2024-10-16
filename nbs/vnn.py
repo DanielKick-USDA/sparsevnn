@@ -1,6 +1,6 @@
 # import pprint
 # print = pprint.PrettyPrinter(indent=4).pprint
-
+#TODO move all the funcitons (and patching) to the top of the script
 import os, argparse, re, json, hashlib, pickle # M_list is pickled
 # os.chdir('/home/kickd/Documents/sparsevnn/nbs/demo_maize')
 
@@ -43,6 +43,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 # and plots
 import plotly.express as px
+
+from tqdm import tqdm
 
 torch.set_float32_matmul_precision('medium')
 
@@ -1298,7 +1300,7 @@ match params_run['run_mode']: # setup tune train predict eval
 
                 # Convert M_list into a usable lookup
                 out = []
-                for i in range(len(M_list)):
+                for i in tqdm(range(len(M_list))):
                     # break down a `structured_layer_info` class into a df
                     slinfo = M_list[i]
                     _ = [(k, int(slinfo.col_info[k]['start']), int(slinfo.col_info[k]['stop'])) for k in slinfo.col_info.keys()]
@@ -1321,37 +1323,81 @@ match params_run['run_mode']: # setup tune train predict eval
                                 [])}
                 )
 
+                # Improved verison
+                _ = []
+                for node in out.node_forward_idx:
+                    mask = (out.node_forward_idx == node)
+
+                    start = out.loc[mask, 'start'].values[0].astype(int)
+                    stop  = out.loc[mask, 'stop' ].values[0].astype(int)
+
+                    _.append(
+                    pd.DataFrame({
+                        'node_forward_idx': out.loc[mask, 'node_forward_idx' ].values[0].astype(int), 
+                        'node':  out.loc[mask, 'node' ].values[0], 
+                        'start': out.loc[mask, 'start' ].values[0].astype(int), 
+                        'stop':  out.loc[mask, 'stop' ].values[0].astype(int), 
+                        'layer': out.loc[mask, 'layer' ].values[0].astype(int),                            
+                        'idx':   [i for i in range(start, stop)]
+                        })
+                    )
+                _ = pd.concat(_, axis = 0).reset_index(drop = True)
+                # make sure everything is sorted
+                _ = _.sort_values(['layer', 'idx']).reset_index(drop = True)
+                lookup = _.copy()
+
 
                 y_actual = [] # Track the actual y and the...
                 node_out = [] # outputs of each node
 
 
-                for i, (y,x) in enumerate(inp_dl):
+                for i, (y,x) in tqdm(enumerate(inp_dl)):
                     # This is the .forward() method adapted to store all the interediate tensors
                     with torch.no_grad():
                         tensor_out = [x]
                         for l in model.layer_list:
                             tensor_out.append(l(tensor_out[-1]))
-                            
-                    # print(model(x_i)[0:5], tensor_out[-1][0:5]) # This shows that ther are the same 
 
-                    # Organize the intermediate outputs into a long structured matrix
                     _ = []
-                    for node in out.node_forward_idx:
-                        mask = (out.node_forward_idx == node)
-                        start = out.loc[mask, 'start'].values[0].astype(int)
-                        stop  = out.loc[mask, 'stop' ].values[0].astype(int)
-                        layer = out.loc[mask, 'layer'].values[0].astype(int)
-
-                        _.append(tensor_out[layer][:, start:stop])
-
-                    # these are all in the shape (obs, vals) so we need to concat and transpose to match output_tracker
+                    for layer in sorted(list(set(lookup.layer))):
+                        _.append( tensor_out[layer][:, lookup.loc[(lookup.layer == layer), 'idx'].tolist()] )
                     tmp = torch.concat(_, dim=1).swapaxes(0,1).numpy()
-
+                    
                     y_actual.append( y.swapaxes(0,1).numpy() )
                     node_out.append( tmp )
 
+                
+                # # Original version
+                # y_actual = [] # Track the actual y and the...
+                # node_out = [] # outputs of each node
 
+                # print(f'{datetime.now()} in _collect_rho forward pass')
+                # for i, (y,x) in tqdm(enumerate(inp_dl)):
+                #     # This is the .forward() method adapted to store all the interediate tensors
+                #     with torch.no_grad():
+                #         tensor_out = [x]
+                #         for l in model.layer_list:
+                #             tensor_out.append(l(tensor_out[-1]))
+                            
+                #     # print(model(x_i)[0:5], tensor_out[-1][0:5]) # This shows that ther are the same 
+
+                #     # Organize the intermediate outputs into a long structured matrix
+                #     _ = []
+                #     for node in out.node_forward_idx:
+                #         mask = (out.node_forward_idx == node)
+                #         start = out.loc[mask, 'start'].values[0].astype(int)
+                #         stop  = out.loc[mask, 'stop' ].values[0].astype(int)
+                #         layer = out.loc[mask, 'layer'].values[0].astype(int)
+
+                #         _.append(tensor_out[layer][:, start:stop])
+
+                #     # these are all in the shape (obs, vals) so we need to concat and transpose to match output_tracker
+                #     tmp = torch.concat(_, dim=1).swapaxes(0,1).numpy()
+
+                #     y_actual.append( y.swapaxes(0,1).numpy() )
+                #     node_out.append( tmp )
+
+                print(f'{datetime.now()} in _collect_rho concat')
                 y_actual = np.concatenate(y_actual, axis = 1) # dim (y var,  obs )
                 node_out = np.concatenate(node_out, axis = 1) # dim (nodes x val per node,  obs )
 
@@ -1360,7 +1406,7 @@ match params_run['run_mode']: # setup tune train predict eval
                 rho_val = np.zeros((y_actual.shape[0], node_out.shape[0]))
                 rho_sig = np.zeros_like(rho_val)
 
-                for y_i in range(rho_val.shape[0]):
+                for y_i in tqdm(range(rho_val.shape[0])):
                     for n_i in range(rho_val.shape[1]):
                         if ((y_actual[y_i, :].std() == 0.0) | 
                             (node_out[n_i, :].std() == 0.0)):
