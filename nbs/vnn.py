@@ -1356,11 +1356,16 @@ match params_run['run_mode']: # setup tune train predict eval
                 cached_tensor_idx = []
                 for i, (y,x) in tqdm(enumerate(inp_dl), ascii = True, desc = 'Conducting forward pass'):
                     # Find gene index in G (inp_dl_G) so we can store lookup values
+                    # i_idx = [torch.where((x[j, :] == inp_dl_G).all(dim=1))[0] for j in range(len(x))]
+                    # i_idx = torch.concatenate(i_idx).cpu().detach().numpy()
+                    # There's a potential bug here. It's possible for some data to be identical after filtering (seen in gmx)
+                    # In this case we return >1 value for where and break. The solution is to default to the minimum index OR 
+                    # to have this be a list and apply the values to all matching entries in inp_dl_G
                     i_idx = [torch.where((x[j, :] == inp_dl_G).all(dim=1))[0] for j in range(len(x))]
-                    i_idx = torch.concatenate(i_idx).cpu().detach().numpy()
-
-                    if False not in [j in cached_tensor_idx for j in i_idx]:
-                        cached_tensor_idx = np.concatenate([cached_tensor_idx, i_idx], axis=0) # 1d 
+                    i_idx = [e.cpu().detach().tolist() for e in i_idx]
+                    # switching to using a list of lists (ideally each containing only one entry)
+                    if False not in [jj in cached_tensor_idx for j in i_idx for jj in j]:
+                        cached_tensor_idx = cached_tensor_idx+i_idx 
                         y_actual          = np.concatenate([ y_actual, y.swapaxes(0,1).cpu().detach().numpy()], axis=1)
 
                     else:
@@ -1377,22 +1382,36 @@ match params_run['run_mode']: # setup tune train predict eval
                             _.append( tensor_out[layer][:, lookup.loc[(lookup.layer == layer), 'idx'].tolist()] )
                         tmp = np.concatenate(_, axis=1)#.swapaxes(0,1)
 
-                        if type(cached_tensor_idx) == list:
+                        if type(y_actual) == list:
                             cached_tensor_idx = i_idx
                             y_actual = y.swapaxes(0,1).cpu().detach().numpy()
                             cached_tensor_out = np.zeros((len(inp_dl_G), tmp.shape[1]))
+
                         else:
-                            cached_tensor_idx = np.concatenate([cached_tensor_idx, i_idx], axis=0) # 1d 
+                            # cached_tensor_idx = np.concatenate([cached_tensor_idx, i_idx], axis=0) # 1d 
+                            cached_tensor_idx = cached_tensor_idx+i_idx 
                             y_actual          = np.concatenate([ y_actual, y.swapaxes(0,1).cpu().detach().numpy()], axis=1)
                             # This is doing way more operations than we need but it might be okay. 
                             # Ideally I would check if the index has already been cached. If so we don't need to calculate it or save it. 
-                            cached_tensor_out[i_idx, ] = tmp
+                            # cached_tensor_out[i_idx, ] = tmp
+
+                        # Add in the recovered values (even if they map to multiple inputs)
+                        if 1 == max([len(e) for e in i_idx]):
+                            # if i_idx's sub lists contain only one value then we can collapse the list and use it like an array. 
+                            cached_tensor_out[sum(i_idx, []), ] = tmp
+                        else:
+                            # If not then we have to iterate through 
+                            for j in range(len(tmp)):
+                                for jj in i_idx[j]:
+                                    cached_tensor_out[jj, ] = tmp[j]
 
 
                 # Collapse to summary statistics
                 rho_val = np.zeros((y_actual.shape[0], cached_tensor_out.shape[1]))
                 rho_sig = np.zeros_like(rho_val)
 
+
+                cached_tensor_idx = sum([[e[0]] for e in cached_tensor_idx], []) # if there are duplicate associations for a input arbitraily retain the 0th lookup.
                 for y_i in tqdm(range(rho_val.shape[0]), ascii = True, desc = 'Calculating spearman\'s rho for all y vars'):
                     for n_i in tqdm(range(rho_val.shape[1]), leave = False, ascii = True, desc = '... and intermediates'):
                         if ((y_actual[y_i, :].std() == 0.0) | 
