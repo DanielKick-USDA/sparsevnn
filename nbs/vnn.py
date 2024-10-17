@@ -1283,7 +1283,13 @@ match params_run['run_mode']: # setup tune train predict eval
 
             pq.write_table(pa.Table.from_pandas(df_weight), save_dir+f'/{params_data_subset_hash}_eval_gradients_nodewise_weights.parquet')
             pq.write_table(pa.Table.from_pandas(df_bias),   save_dir+f'/{params_data_subset_hash}_eval_gradients_nodewise_bias.parquet')
-
+            del training_weight_grads
+            del validation_weight_grads
+            del coordinates
+            del col_info
+            del _
+            del df_weight
+            del df_bias
 
         if 'rho_out' in params_run['eval']:
             print('Calculating rho w.r.t. intermediate layer output')
