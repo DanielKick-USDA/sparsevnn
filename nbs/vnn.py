@@ -1348,45 +1348,58 @@ match params_run['run_mode']: # setup tune train predict eval
                 lookup = _.copy()
 
 
+                inp_dl_G = inp_dl.dataset.G
                 y_actual = [] # Track the actual y and the...
-                node_out = [] # outputs of each node
+                cached_tensor_out = []
+                cached_tensor_idx = []
+                for i, (y,x) in tqdm(enumerate(inp_dl), ascii = True, desc = 'Conducting forward pass'):
+                    # Find gene index in G (inp_dl_G) so we can store lookup values
+                    i_idx = [torch.where((x[j, :] == inp_dl_G).all(dim=1))[0] for j in range(len(x))]
+                    i_idx = torch.concatenate(i_idx).cpu().detach().numpy()
 
+                    if False not in [j in cached_tensor_idx for j in i_idx]:
+                        cached_tensor_idx = np.concatenate([cached_tensor_idx, i_idx], axis=0) # 1d 
+                        y_actual          = np.concatenate([ y_actual, y.swapaxes(0,1).cpu().detach().numpy()], axis=1)
 
-                for i, (y,x) in tqdm(enumerate(inp_dl), ascii = True, desc = 'Conducting forward pass'):                   
-                    # This is the .forward() method adapted to store all the interediate tensors
-                    with torch.no_grad():
-                        tensor_out = [x]
-                        for l in model.layer_list:
-                            tensor_out.append(l(tensor_out[-1]))
+                    else:
+                        # This is the .forward() method adapted to store all the interediate tensors
+                        with torch.no_grad():
+                            tensor_out = [x]
+                            for l in model.layer_list:
+                                tensor_out.append(l(tensor_out[-1]))
 
-                    tensor_out = [e.cpu().detach().numpy() for e in tensor_out]
-            
-                    _ = []
-                    for layer in sorted(list(set(lookup.layer))):
-                        _.append( tensor_out[layer][:, lookup.loc[(lookup.layer == layer), 'idx'].tolist()] )
-                    # tmp = torch.concat(_, dim=1).swapaxes(0,1).numpy()
-                    tmp = np.concatenate(_, axis=1).swapaxes(0,1)
+                        tensor_out = [e.cpu().detach().numpy() for e in tensor_out]
+                
+                        _ = []
+                        for layer in sorted(list(set(lookup.layer))):
+                            _.append( tensor_out[layer][:, lookup.loc[(lookup.layer == layer), 'idx'].tolist()] )
+                        tmp = np.concatenate(_, axis=1)#.swapaxes(0,1)
 
-                    # y_actual.append( y.swapaxes(0,1).numpy() )
-                    y_actual.append( y.swapaxes(0,1).cpu().detach().numpy() )
-                    node_out.append( tmp )
-
-                y_actual = np.concatenate(y_actual, axis = 1) # dim (y var,  obs )
-                node_out = np.concatenate(node_out, axis = 1) # dim (nodes x val per node,  obs )
+                        if type(cached_tensor_idx) == list:
+                            cached_tensor_idx = i_idx
+                            y_actual = y.swapaxes(0,1).cpu().detach().numpy()
+                            cached_tensor_out = np.zeros((len(inp_dl_G), tmp.shape[1]))
+                        else:
+                            cached_tensor_idx = np.concatenate([cached_tensor_idx, i_idx], axis=0) # 1d 
+                            y_actual          = np.concatenate([ y_actual, y.swapaxes(0,1).cpu().detach().numpy()], axis=1)
+                            # This is doing way more operations than we need but it might be okay. 
+                            # Ideally I would check if the index has already been cached. If so we don't need to calculate it or save it. 
+                            cached_tensor_out[i_idx, ] = tmp
 
 
                 # Collapse to summary statistics
-                rho_val = np.zeros((y_actual.shape[0], node_out.shape[0]))
+                rho_val = np.zeros((y_actual.shape[0], cached_tensor_out.shape[1]))
                 rho_sig = np.zeros_like(rho_val)
 
                 for y_i in tqdm(range(rho_val.shape[0]), ascii = True, desc = 'Calculating spearman\'s rho for all y vars'):
-                    for n_i in range(rho_val.shape[1]):
+                    for n_i in tqdm(range(rho_val.shape[1]), leave = False, ascii = True, desc = '... and intermediates'):
                         if ((y_actual[y_i, :].std() == 0.0) | 
-                            (node_out[n_i, :].std() == 0.0)):
+                            (cached_tensor_out[cached_tensor_idx, n_i].std() == 0.0)): # expand out tensor to account for duplicate inputs
+                            # (node_out[n_i, :].std() == 0.0)):
                             val, sig = np.nan, np.nan
                         
                         else:
-                            val, sig = scipy.stats.spearmanr( y_actual[y_i, :], node_out[n_i, :] )
+                            val, sig = scipy.stats.spearmanr( y_actual[y_i, :], cached_tensor_out[cached_tensor_idx, n_i] )
                         
                         rho_val[y_i, n_i] = val
                         rho_sig[y_i, n_i] = sig
@@ -1397,14 +1410,17 @@ match params_run['run_mode']: # setup tune train predict eval
                     pd.DataFrame(rho_sig.swapaxes(0,1), columns=[e+'_sig' for e in y_names])    
                     ], axis=1)
 
+                # Add lookup info (node names)
+                output_tracker = lookup.loc[:, ['node_forward_idx', 'node']].drop_duplicates().merge(output_tracker)
                 return output_tracker
 
             trn_rho = _collect_rho(model = model, M_list = M_list, inp_dl = training_dataloader)
-            val_rho = _collect_rho(model = model, M_list = M_list, inp_dl = validation_dataloader)
-
             pq.write_table(pa.Table.from_pandas(trn_rho), save_dir+f'/{params_data_subset_hash}_eval_rho_nodewise_trn.parquet')
-            pq.write_table(pa.Table.from_pandas(val_rho), save_dir+f'/{params_data_subset_hash}_eval_rho_nodewise_val.parquet')
+            del trn_rho
 
+            val_rho = _collect_rho(model = model, M_list = M_list, inp_dl = validation_dataloader)
+            pq.write_table(pa.Table.from_pandas(val_rho), save_dir+f'/{params_data_subset_hash}_eval_rho_nodewise_val.parquet')
+            del val_rho
 
     case _:
         print('Base case not implemented!!')
