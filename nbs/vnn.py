@@ -1135,7 +1135,7 @@ match params_run['run_mode']: # setup tune train predict eval
                     gene_nodes_gff = gene_nodes_gff, 
                     e = training_inp_sals)
                 pq.write_table(pa.Table.from_pandas(salience), save_dir+f'/{params_data_subset_hash}_eval_salience_snpwise_trn.parquet')
-                _plt_saliences(salience = salience, save_dir = save_dir, plt_prefix = f'/{params_data_subset_hash}_eval_trn_salience_snpwise')  
+                _ = _plt_saliences(salience = salience, save_dir = save_dir, plt_prefix = f'/{params_data_subset_hash}_eval_trn_salience_snpwise')  
 
                 print('Calculating salience w.r.t. input (gene-wise) -- training')
                 training_inp_sals   = _collapse_salience_genewise(M_list = M_list, acgt_loci = acgt_loci, sals = training_inp_sals)
@@ -1179,7 +1179,9 @@ match params_run['run_mode']: # setup tune train predict eval
             # Observed with gmx data and params: 
             # "{'default_decay_rate': 0, 'default_drop_nodes_edge': 0.0, 'default_drop_nodes_inp': 0.0, 'default_drop_nodes_out': 0.0, 'default_out_nodes_edge': 2, 
             #   'default_out_nodes_inp': 1, 'default_out_nodes_out': 2, 'default_reps_nodes_edge': 2, 'default_reps_nodes_inp': 1, 'default_reps_nodes_out': 1}"
-            def collect_gradients(model, inp_dl = training_dataloader):               
+            def collect_gradients(model, inp_dl = training_dataloader):      
+                if next(iter(inp_dl))[0].get_device() != -1:
+                    model = model.to('cuda')         
                 "Returns a tuple of weight grads, bias grads"
                 # Setup list of lists [layer, ..., layer] with batch in layer
                 gradient_weight_holder = [[] for i in model.layer_list]
