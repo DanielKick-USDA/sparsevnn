@@ -641,9 +641,6 @@ else:
     )
 
 
-
-# next(iter(training_dataloader))
-
 ## Customizable Training Functions ============================================
 def train_one_model(
     params = params,
@@ -1008,8 +1005,8 @@ match params_run['run_mode']: # setup tune train predict eval
             M_list = pickle.load(f)
 
 
-        if 'saliency_inp' in params_run['eval']:     
-            print('Calculating salience w.r.t. input (snp-wise)')
+        if 'saliency_inp' in params_run['eval']:
+            print('Calculating salience')
             model = model.eval()
 
             # iterate over dataloader and aggregate all of the saliences for the input data
@@ -1041,21 +1038,12 @@ match params_run['run_mode']: # setup tune train predict eval
 
                 out = []
                 for i, (y,x) in enumerate(inp_dl):
-                    break
-
-                out = []
-                for i, (y,x) in enumerate(inp_dl):
                     out.append(_get_saliency(y_i = y, x_i = x, model = model))
                 out = np.concatenate(out)
 
                 #reverse workup for acgt_tensor to get (obs, nuc, len)
                 return out
 
-            if params_data['dataloader_shuffle_train'] == False:
-                training_inp_sals   = _collect_salience_snpwise(model = model, inp_dl = training_dataloader)
-
-            if params_data['dataloader_shuffle_valid'] == False:
-                validation_inp_sals = _collect_salience_snpwise(model = model, inp_dl = validation_dataloader)
 
             ### SNP-wise Manhattan 
             def _plt_saliences(salience, save_dir,  plt_prefix):
@@ -1084,9 +1072,10 @@ match params_run['run_mode']: # setup tune train predict eval
                 return plt_m, plt_d
             
 
-            def _collapse_and_add_gff_annotations(acgt_loci = acgt_loci, 
-                                     gene_nodes_gff = gene_nodes_gff, 
-                                     e = validation_inp_sals):
+            def _collapse_and_add_gff_annotations(acgt_loci, # = acgt_loci, 
+                                     gene_nodes_gff, # = gene_nodes_gff, 
+                                     e, # = validation_inp_sals
+                                     ):
                 salience = acgt_loci.copy()
                 salience['salience'] = e.max(axis = 0) # max over observation axis
                 salience = salience.reset_index()
@@ -1103,28 +1092,9 @@ match params_run['run_mode']: # setup tune train predict eval
                         ), 'cxn'] = cxn_val
                 return salience
             
-            # Training      
-            if params_data['dataloader_shuffle_train'] == False:
-                salience = _collapse_and_add_gff_annotations(
-                    acgt_loci = acgt_loci, 
-                    gene_nodes_gff = gene_nodes_gff, 
-                    e = training_inp_sals)
-                pq.write_table(pa.Table.from_pandas(salience), save_dir+f'/{params_data_subset_hash}_eval_salience_snpwise_trn.parquet')
-                _plt_saliences(salience = salience, save_dir = save_dir, plt_prefix = f'/{params_data_subset_hash}_eval_trn_salience_snpwise')  
-
-            # Validation
-            if params_data['dataloader_shuffle_valid'] == False:                  
-                salience = _collapse_and_add_gff_annotations(
-                    acgt_loci = acgt_loci, 
-                    gene_nodes_gff = gene_nodes_gff, 
-                    e = validation_inp_sals)
-                pq.write_table(pa.Table.from_pandas(salience), save_dir+f'/{params_data_subset_hash}_eval_salience_snpwise_val.parquet')
-                _plt_saliences(salience = salience, save_dir = save_dir, plt_prefix = f'/{params_data_subset_hash}_eval_val_salience_snpwise')  
-
-
+            
             # NOTE this could also be broken up into snpwise and genewise options
             ### Gene-wise Manhattan
-            print('Calculating salience w.r.t. input (gene-wise)')
             def _collapse_salience_genewise(M_list, acgt_loci, sals):
                 # I can get the gene associations back like this. Not the same as a manhattan
                 _ = pd.DataFrame([(
@@ -1154,17 +1124,46 @@ match params_run['run_mode']: # setup tune train predict eval
 
                 return salience
 
-            
-            training_inp_sals   = _collapse_salience_genewise(M_list = M_list, acgt_loci = acgt_loci, sals = training_inp_sals)
-            validation_inp_sals = _collapse_salience_genewise(M_list = M_list, acgt_loci = acgt_loci, sals = validation_inp_sals)
 
+            # Training      
             if params_data['dataloader_shuffle_train'] == False:
+                print('Calculating salience w.r.t. input (snp-wise) -- training')
+                training_inp_sals   = _collect_salience_snpwise(model = model, inp_dl = training_dataloader)
+
+                salience = _collapse_and_add_gff_annotations(
+                    acgt_loci = acgt_loci, 
+                    gene_nodes_gff = gene_nodes_gff, 
+                    e = training_inp_sals)
+                pq.write_table(pa.Table.from_pandas(salience), save_dir+f'/{params_data_subset_hash}_eval_salience_snpwise_trn.parquet')
+                _plt_saliences(salience = salience, save_dir = save_dir, plt_prefix = f'/{params_data_subset_hash}_eval_trn_salience_snpwise')  
+
+                print('Calculating salience w.r.t. input (gene-wise) -- training')
+                training_inp_sals   = _collapse_salience_genewise(M_list = M_list, acgt_loci = acgt_loci, sals = training_inp_sals)
                 _ = _plt_saliences(salience=training_inp_sals,   save_dir = save_dir, plt_prefix = f'/{params_data_subset_hash}_eval_trn_salience_genewise')
                 pq.write_table(pa.Table.from_pandas(training_inp_sals), save_dir+f'/{params_data_subset_hash}_eval_salience_genewise_trn.parquet')
 
-            if params_data['dataloader_shuffle_valid'] == False:
+                del salience
+                del training_inp_sals
+
+
+            # Validation
+            if params_data['dataloader_shuffle_valid'] == False:                  
+                print('Calculating salience w.r.t. input (snp-wise) -- training')
+                validation_inp_sals = _collect_salience_snpwise(model = model, inp_dl = validation_dataloader)            
+                salience = _collapse_and_add_gff_annotations(
+                    acgt_loci = acgt_loci, 
+                    gene_nodes_gff = gene_nodes_gff, 
+                    e = validation_inp_sals)
+                pq.write_table(pa.Table.from_pandas(salience), save_dir+f'/{params_data_subset_hash}_eval_salience_snpwise_val.parquet')
+                _plt_saliences(salience = salience, save_dir = save_dir, plt_prefix = f'/{params_data_subset_hash}_eval_val_salience_snpwise')  
+
+                print('Calculating salience w.r.t. input (gene-wise) -- validation')
+                validation_inp_sals = _collapse_salience_genewise(M_list = M_list, acgt_loci = acgt_loci, sals = validation_inp_sals)
                 _ = _plt_saliences(salience=validation_inp_sals, save_dir = save_dir, plt_prefix = f'/{params_data_subset_hash}_eval_val_salience_genewise')
                 pq.write_table(pa.Table.from_pandas(validation_inp_sals), save_dir+f'/{params_data_subset_hash}_eval_salience_genewise_val.parquet')
+
+                del salience
+                del validation_inp_sals
 
 
         if 'saliency_wab' in params_run['eval']:
