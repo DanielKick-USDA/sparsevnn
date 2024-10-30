@@ -262,6 +262,10 @@ params_data_subset = {e:params_data[e] for e in [
  'kegg_catalog',
  'graph_cxn',   
  'holdout_taxa_ignore',
+ 'holdout_type',
+ 'holdout_percent',
+ 'holdout_seed',
+ 'holdout_taxa'
 ]}
 
 if not use_data_cache:
@@ -574,6 +578,11 @@ match params_data['holdout_type']:
 
 train_idx = obs_geno_lookup.loc[(obs_geno_lookup.Geno_Idx.isin(trn_Geno_Idx)), 'Phno_Idx'].tolist()
 test_idx  = obs_geno_lookup.loc[(obs_geno_lookup.Geno_Idx.isin(tst_Geno_Idx)), 'Phno_Idx'].tolist()
+
+if use_data_cache: 
+    ## write out to aid modeling in R
+    pq.write_table(pa.Table.from_pandas(pd.DataFrame({'train_idx':train_idx})), f'./vnn_cache/{params_data_subset_hash}_train_idx.parquet')
+    pq.write_table(pa.Table.from_pandas(pd.DataFrame({'test_idx':test_idx  })), f'./vnn_cache/{params_data_subset_hash}_test_idx.parquet')
 
 print(f'Train:\t{len(train_idx)}\nTest:\t{len(test_idx)}\nHolding out {round( 100*len(test_idx)/(len(train_idx)+len(test_idx)) , 3)}%')
 
