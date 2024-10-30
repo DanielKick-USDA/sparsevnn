@@ -176,6 +176,7 @@ def params_run(): return {
     ## train ====
     'train_from_ax' : False, # should we use the best ax trial or a user specified network?
     'train_save': True,
+    'train_name': '',
     ## predict ====
     ## eval ====
     'eval': [],
