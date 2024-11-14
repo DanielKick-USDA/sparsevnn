@@ -608,7 +608,7 @@ myvnn = sparsevnn.util.mk_vnnhelper(
         edge_dict = cxn_dict,
         num_nucleotides = 4, # this could also be 1 for major/minor allele. 
         inp_tensor_lookup = inp_node_idx_dict,
-        params = params
+        params = sparsevnn.qol.params() #NOTE Because we only need this for setup and the params variable contains different attributes we provide the default dict.
         )
 
 # build dependancy dictionary
