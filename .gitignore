@@ -1,6 +1,19 @@
 data_ext/
+# ultimately remove thse
+data/*/kegg
+data_demos/*
+sparsevnn/test_data
+# files associated with the vnn.py cli
+params*.json
+nbs/demo
+nbs/demo*
+nbs/phno*.csv
+hash_lookup.json
+
 _docs/
 _proc/
+
+*.tar.gz
 
 *.bak
 .gitattributes
